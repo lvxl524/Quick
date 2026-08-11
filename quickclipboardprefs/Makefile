@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = QuickClipboardPrefs
 
-QuickClipboardPrefs_FILES = QCRootListController.m QCWebDAVController.m QCLANController.m QCBuildController.m
+QuickClipboardPrefs_FILES = QCRootListController.m QCWebDAVController.m QCLANController.m
 QuickClipboardPrefs_INSTALL_PATH = /Library/PreferenceBundles
 QuickClipboardPrefs_FRAMEWORKS = UIKit
 QuickClipboardPrefs_CFLAGS = -fobjc-arc -Wno-error -Wno-unused-variable -Wno-unused-function
