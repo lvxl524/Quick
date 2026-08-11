@@ -10,6 +10,7 @@ TWEAK_NAME = QuickClipboardTweak
 QuickClipboardTweak_FILES = Tweak.xm QCClipItem.m QCClipManager.m QCStore.m QCWebDAVClient.m QCLANServer.m QCGitHubHelper.m QCDeviceAuthenticator.m
 QuickClipboardTweak_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-nullability-completeness
 QuickClipboardTweak_PRIVATE_FRAMEWORKS = AppSupport
+QuickClipboardTweak_FRAMEWORKS = UIKit
 QuickClipboardTweak_LIBRARIES = sqlite3 z
 
 include $(THEOS_MAKE_PATH)/tweak.mk

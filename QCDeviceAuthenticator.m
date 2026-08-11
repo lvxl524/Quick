@@ -1,4 +1,5 @@
 #import "QCDeviceAuthenticator.h"
+#import <UIKit/UIKit.h>
 
 @implementation QCDeviceAuthenticator
 

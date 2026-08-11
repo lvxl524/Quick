@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 #define QC_PREFS_PATH @"/var/mobile/Library/Preferences/com.mosheng.quickclipboard.plist"
 #define QC_DB_PATH @"/var/mobile/Library/QuickClipboard/clipboard.db"
