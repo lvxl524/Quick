@@ -8,7 +8,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = QuickClipboardTweak
 
-QuickClipboardTweak_FILES = Tweak.xm QCClipItem.m QCClipManager.m QCStore.m QCWebDAVClient.m QCLANServer.m QCGitHubHelper.m QCDeviceAuthenticator.m
+QuickClipboardTweak_FILES = Tweak.xm QCClipItem.m QCClipManager.m QCStore.m QCWebDAVClient.m QCLANServer.m
 QuickClipboardTweak_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-nullability-completeness -Wno-error=nonnull -Wno-error -Wno-unused-variable -Wno-unused-function
 QuickClipboardTweak_FRAMEWORKS = UIKit
 QuickClipboardTweak_LIBRARIES = sqlite3 z
