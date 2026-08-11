@@ -12,8 +12,15 @@
 
 @implementation QCRootListController
 
+// Return empty specifiers to satisfy PSListController contract without
+// creating a table view — we use a custom segmented UI instead.
+- (id)specifiers {
+    return @[];
+}
+
 - (void)viewDidLoad {
-    [super viewDidLoad];
+    // NOT calling [super viewDidLoad] — PSListController's version tries
+    // to set up a table view, which conflicts with our custom UI.
     self.title = @"QuickClipboard";
     
     self.segmentedControl = [[UISegmentedControl alloc] initWithItems:@[@"WebDAV", @"局域网", @"构建"]];
