@@ -2,6 +2,10 @@
 #import "QCLANServer.h"
 #import "QCStore.h"
 #import <objc/runtime.h>
+#import <ifaddrs.h>
+#import <arpa/inet.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
 
 static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 
