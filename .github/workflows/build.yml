@@ -53,6 +53,11 @@ jobs:
             ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS.sdk"
           fi
 
+      - name: Fix maintainer script permissions
+        run: |
+          chmod 755 layout/DEBIAN/postinst layout/DEBIAN/prerm 2>/dev/null || true
+          ls -la layout/DEBIAN/
+
       - name: Build package
         run: |
           make clean || true
