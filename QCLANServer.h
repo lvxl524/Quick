@@ -18,8 +18,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)stop;
 - (void)broadcastChange;
 - (void)pairWithAddress:(NSString *)address code:(NSString *)code completion:(void (^)(BOOL success, NSString *message))completion;
-- (void)pushToPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion;
-- (void)pullFromPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion;
+- (void)pushToPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
+- (void)pullFromPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
 @end
 
 NS_ASSUME_NONNULL_END
