@@ -2,7 +2,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface QCLANController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
+@interface QCLANController : UIViewController
 @end
 
 NS_ASSUME_NONNULL_END
