@@ -1,0 +1,11 @@
+#!/bin/sh
+# postinst for QuickClipboard
+set -e
+
+mkdir -p /var/mobile/Library/QuickClipboard
+chown -R mobile:mobile /var/mobile/Library/QuickClipboard
+chmod 755 /var/mobile/Library/QuickClipboard
+
+killall -9 SpringBoard || true
+
+exit 0
