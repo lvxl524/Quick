@@ -48,7 +48,7 @@ jobs:
           fi
           ls $THEOS/sdks/ || true
 
-      - name: Fallback: link Xcode iPhoneOS SDK
+      - name: "Fallback - link Xcode iPhoneOS SDK"
         run: |
           THEOS=/Users/runner/theos
           if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
