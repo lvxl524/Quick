@@ -1,0 +1,126 @@
+name: Build QuickClipboard deb
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify control version
+        run: |
+          echo "=== control file content ==="
+          cat layout/DEBIAN/control
+          echo ""
+          VERSION=$(grep '^Version:' layout/DEBIAN/control | awk '{print $2}')
+          echo "Version from control: $VERSION"
+          echo "CONTROL_VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Install Theos dependencies
+        run: |
+          brew install ldid make || true
+          brew unlink ldid && brew link ldid || true
+
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: /Users/runner/theos
+          key: theos-macos-${{ runner.os }}-v2
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          export THEOS=/Users/runner/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          mkdir -p $THEOS/sdks
+
+      - name: Set THEOS env
+        run: |
+          echo "THEOS=/Users/runner/theos" >> $GITHUB_ENV
+          echo "/Users/runner/theos/bin" >> $GITHUB_PATH
+
+      - name: Fetch patched SDK with private frameworks
+        run: |
+          THEOS=/Users/runner/theos
+          if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
+            git clone --depth 1 https://github.com/theos/sdks /tmp/qc-sdks || true
+            cp -R /tmp/qc-sdks/* $THEOS/sdks/ 2>/dev/null || true
+          fi
+          ls $THEOS/sdks/ || true
+
+      - name: "Fallback - link Xcode iPhoneOS SDK"
+        run: |
+          THEOS=/Users/runner/theos
+          if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
+            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+            ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS.sdk"
+          fi
+
+      - name: Fix maintainer script permissions
+        run: |
+          chmod 755 layout/DEBIAN/postinst layout/DEBIAN/prerm 2>/dev/null || true
+          ls -la layout/DEBIAN/
+
+      - name: Aggressive clean (remove all build cache)
+        run: |
+          make clean 2>/dev/null || true
+          rm -rf .theos .theos-obj obj packages
+          echo "Cleaned all build artifacts"
+
+      - name: Build package
+        run: |
+          echo "=== Building version $CONTROL_VERSION ==="
+          cat layout/DEBIAN/control
+          make package FINALPACKAGE=1
+
+      - name: Verify deb version
+        run: |
+          echo "=== Generated packages ==="
+          ls -la packages/
+          echo ""
+          for f in packages/*.deb; do
+            echo "=== Deb info: $f ==="
+            echo "Filename version check:"
+            echo "$f" | grep -oP '\d+\.\d+\.\d+'
+            echo "Package metadata:"
+            dpkg-deb -I "$f" | grep -E '^( Package:| Version:)'
+          done
+
+      - name: Fail if version mismatch
+        run: |
+          EXPECTED="$CONTROL_VERSION"
+          for f in packages/*.deb; do
+            DEB_VERSION=$(dpkg-deb -I "$f" | grep '^ Version:' | awk '{print $2}')
+            FILENAME_VERSION=$(echo "$f" | grep -oP '\d+\.\d+\.\d+(?=_iphoneos)' || echo "$f" | sed 's/.*_\([0-9.]*\)_.*/\1/')
+            echo "Expected: $EXPECTED, Deb metadata: $DEB_VERSION"
+            if [ "$DEB_VERSION" != "$EXPECTED" ]; then
+              echo "ERROR: Version mismatch! Expected $EXPECTED but deb has $DEB_VERSION"
+              exit 1
+            fi
+          done
+          echo "Version verification PASSED"
+
+      - name: Upload deb artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickClipboard-deb
+          path: packages/*.deb
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            packages/*.log
+            theos.log
+            *.log
