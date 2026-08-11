@@ -9,6 +9,5 @@ QuickClipboardPrefs_FILES = QCRootListController.m QCWebDAVController.m QCLANCon
 QuickClipboardPrefs_INSTALL_PATH = /Library/PreferenceBundles
 QuickClipboardPrefs_FRAMEWORKS = UIKit
 QuickClipboardPrefs_CFLAGS = -fobjc-arc -Wno-error -Wno-unused-variable -Wno-unused-function
-QuickClipboardPrefs_LDFLAGS = -weak_framework Preferences
 
 include $(THEOS_MAKE_PATH)/bundle.mk
