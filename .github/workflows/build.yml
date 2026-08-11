@@ -1,0 +1,89 @@
+name: Build QuickClipboard deb
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'QuickClipboardTweak/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos dependencies
+        run: |
+          brew install ldid make || true
+          brew unlink ldid && brew link ldid || true
+
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: /Users/runner/theos
+          key: theos-macos-${{ runner.os }}-2026
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          export THEOS=/Users/runner/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          mkdir -p $THEOS/sdks
+
+      - name: Set THEOS env
+        run: |
+          echo "THEOS=/Users/runner/theos" >> $GITHUB_ENV
+          echo "/Users/runner/theos/bin" >> $GITHUB_PATH
+
+      - name: Fetch patched SDK with private frameworks
+        run: |
+          THEOS=/Users/runner/theos
+          if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
+            git clone --depth 1 https://github.com/theos/sdks /tmp/qc-sdks || true
+            cp -R /tmp/qc-sdks/* $THEOS/sdks/ 2>/dev/null || true
+          fi
+          ls $THEOS/sdks/ || true
+
+      - name: Fallback: link Xcode iPhoneOS SDK
+        run: |
+          THEOS=/Users/runner/theos
+          if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
+            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+            ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS.sdk"
+          fi
+
+      - name: Build package
+        working-directory: QuickClipboardTweak
+        run: |
+          make clean || true
+          make package FINALPACKAGE=1
+
+      - name: Verify deb
+        working-directory: QuickClipboardTweak
+        run: |
+          ls -la packages/
+          for f in packages/*.deb; do
+            dpkg-deb -I "$f" || true
+          done
+
+      - name: Upload deb artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickClipboard-deb
+          path: QuickClipboardTweak/packages/*.deb
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            QuickClipboardTweak/**/*.log
+            QuickClipboardTweak/theos.log

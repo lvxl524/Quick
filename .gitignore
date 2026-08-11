@@ -1,0 +1,20 @@
+# Theos build artifacts
+obj/
+packages/
+.theos/
+*.deb
+*.dylib
+
+# Xcode
+*.xcworkspace
+*.xcodeproj
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+/tmp/qc_*.json
+/tmp/qc_*.log
