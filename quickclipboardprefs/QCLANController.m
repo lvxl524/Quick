@@ -2,9 +2,11 @@
 #import "QCLANServer.h"
 #import "QCStore.h"
 #import <objc/runtime.h>
-#import <ifaddrs.h>
-#import <arpa/inet.h>
-#import <sys/time.h>
+
+static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
+
+
+#pragma mark - UIButton Category
 
 @implementation UIButton (QCLANPeerID)
 static const void *kPeerIdKey = &kPeerIdKey;
@@ -12,9 +14,9 @@ static const void *kPeerIdKey = &kPeerIdKey;
 - (void)setPeerId:(NSString *)peerId { objc_setAssociatedObject(self, kPeerIdKey, peerId, OBJC_ASSOCIATION_COPY_NONATOMIC); }
 @end
 
-// ============================================================
-// MARK: - Status Pill Component
-// ============================================================
+
+#pragma mark - Status Pill Component
+
 @interface QCLANStatusPill : UIView
 - (instancetype)initWithLabel:(NSString *)label value:(NSString *)value active:(BOOL)active;
 - (void)updateValue:(NSString *)value active:(BOOL)active;
@@ -76,12 +78,11 @@ static const void *kPeerIdKey = &kPeerIdKey;
         self.layer.borderWidth = 0;
     }
 }
-
 @end
 
-// ============================================================
-// MARK: - Card Component
-// ============================================================
+
+#pragma mark - Card Component
+
 @interface QCLANCardView : UIView
 @property (nonatomic, strong) UIView *contentView;
 - (instancetype)initWithTitle:(NSString *)title;
@@ -119,48 +120,36 @@ static const void *kPeerIdKey = &kPeerIdKey;
     }
     return self;
 }
-
 @end
 
-// ============================================================
-// MARK: - Main Controller
-// ============================================================
+
+#pragma mark - Main Controller
+
 @interface QCLANController ()
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) NSUserDefaults *defaults;
 @property (nonatomic, strong) NSMutableArray<QCLANPeer *> *pairedDevices;
 @property (nonatomic, strong) NSArray<QCLANPeer *> *discoveredDevices;
 
-// UI state
 @property (nonatomic, assign) BOOL pairCodeVisible;
 @property (nonatomic, assign) BOOL isScanning;
 @property (nonatomic, assign) BOOL httpRunning;
 
-// Settings
 @property (nonatomic, assign) BOOL sendEnabled;
 @property (nonatomic, assign) BOOL receiveEnabled;
 @property (nonatomic, assign) BOOL notifyEnabled;
 
-// Local info
 @property (nonatomic, copy) NSString *pairingCode;
 @property (nonatomic, copy) NSString *localAddress;
 
-// Manual pair inputs
 @property (nonatomic, strong) UITextField *peerUrlField;
 @property (nonatomic, strong) UITextField *peerCodeField;
 
-// Dynamic views (for updating)
 @property (nonatomic, strong) QCLANStatusPill *httpPill;
 @property (nonatomic, strong) QCLANStatusPill *pairedPill;
 @property (nonatomic, strong) QCLANStatusPill *dataPill;
 @property (nonatomic, strong) UILabel *codeLabel;
 @property (nonatomic, strong) UILabel *endpointLabel;
-
-// Discovery socket
-@property (nonatomic, assign) int discoverySocket;
-@property (nonatomic, strong) dispatch_source_t discoverySource;
-@property (nonatomic, strong) dispatch_queue_t scanQueue;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, QCLANPeer *> *scanResults;
 @end
 
 @implementation QCLANController
@@ -169,30 +158,24 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [super viewDidLoad];
 
     self.defaults = [NSUserDefaults standardUserDefaults];
-    self.scanQueue = dispatch_queue_create("com.mosheng.qcprefs.scan", DISPATCH_QUEUE_SERIAL);
-    self.scanResults = [NSMutableDictionary dictionary];
     self.pairedDevices = [NSMutableArray array];
+    self.discoveredDevices = @[];
 
-    // Load settings
     self.sendEnabled    = [self.defaults boolForKey:@"lanSendEnabled"];
     self.receiveEnabled = [self.defaults objectForKey:@"lanReceiveEnabled"] ? [self.defaults boolForKey:@"lanReceiveEnabled"] : YES;
     self.notifyEnabled  = [self.defaults boolForKey:@"lanSyncNotifyEnabled"];
     self.pairCodeVisible = YES;
-    self.httpRunning = self.receiveEnabled;
+    self.httpRunning = YES;
 
-    // Get pairing code from server/user defaults
     self.pairingCode = [self.defaults stringForKey:@"lanPairingCode"];
     if (!self.pairingCode || self.pairingCode.length == 0) {
-        self.pairingCode = [[QCLANServer sharedServer] pairCode] ?: @"------";
+        self.pairingCode = @"------";
     }
 
-    // Get local IP
     self.localAddress = [self getLocalIPAddress] ?: @"未连接";
 
-    // Load paired devices from server
-    [self reloadPairedDevices];
+    [self loadPeersFromServer];
 
-    // Setup scroll view
     self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
     self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.scrollView.alwaysBounceVertical = YES;
@@ -202,47 +185,178 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [self buildUI];
 }
 
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
-    [self stopDiscovery];
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self loadPeersFromServer];
+    [self refreshServerStatus];
 }
 
-#pragma mark - Data
+#pragma mark - Server Communication (via HTTP to local tweak process)
 
-- (void)reloadPairedDevices {
-    NSArray *peers = [[QCLANServer sharedServer] pairedDevices];
-    [self.pairedDevices removeAllObjects];
-    for (QCLANPeer *p in peers) {
-        if (p.paired) [self.pairedDevices addObject:p];
-    }
-}
+- (void)loadPeersFromServer {
+    [self apiGet:@"/peers" completion:^(NSDictionary *json, NSError *error) {
+        if (error || !json) return;
+        NSArray *peersArr = json[@"peers"];
+        if (![peersArr isKindOfClass:[NSArray class]]) return;
 
-- (NSString *)getLocalIPAddress {
-    struct ifaddrs *ifaddr = NULL;
-    if (getifaddrs(&ifaddr) != 0) return nil;
-    NSString *ip = nil;
-    for (struct ifaddrs *ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
-        if (strncmp(ifa->ifa_name, "en", 2) == 0 || strncmp(ifa->ifa_name, "pdp_ip", 6) == 0) {
-            char addrBuf[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr, addrBuf, sizeof(addrBuf));
-            ip = [NSString stringWithUTF8String:addrBuf];
-            break;
+        [self.pairedDevices removeAllObjects];
+        for (NSDictionary *dict in peersArr) {
+            QCLANPeer *peer = [[QCLANPeer alloc] init];
+            peer.name     = dict[@"name"]     ?: @"Unknown";
+            peer.address  = dict[@"address"]  ?: @"";
+            peer.port     = [dict[@"port"] unsignedShortValue];
+            peer.pairCode = dict[@"pairCode"] ?: @"";
+            peer.peerId   = dict[@"peerId"]   ?: @"";
+            peer.paired   = [dict[@"paired"] boolValue];
+            peer.lastSeen = [NSDate dateWithTimeIntervalSince1970:[dict[@"lastSeen"] doubleValue]];
+            if (peer.paired) [self.pairedDevices addObject:peer];
         }
-    }
-    freeifaddrs(ifaddr);
-    return ip;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self buildUI];
+        });
+    }];
 }
 
-- (NSInteger)clipCount {
-    NSArray *items = [[QCStore sharedStore] allItems];
-    return items ? items.count : 0;
+- (void)refreshServerStatus {
+    [self apiGet:@"/ping" completion:^(NSDictionary *json, NSError *error) {
+        if (json) {
+            self.httpRunning = YES;
+            NSString *code = json[@"code"];
+            if (code) {
+                self.pairingCode = code;
+            }
+        } else {
+            self.httpRunning = NO;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.httpPill) {
+                [self.httpPill updateValue:self.httpRunning ? @"运行中" : @"已停止" active:self.httpRunning];
+            }
+        });
+    }];
 }
 
-- (NSInteger)favoriteCount {
-    NSArray *items = [[QCStore sharedStore] favoriteItems];
-    return items ? items.count : 0;
+- (void)performScanViaServer {
+    self.isScanning = YES;
+    self.discoveredDevices = @[];
+    [self buildUI]; // show scanning button state
+
+    [self apiGet:@"/scan" completion:^(NSDictionary *json, NSError *error) {
+        self.isScanning = NO;
+
+        NSMutableArray *devices = [NSMutableArray array];
+        NSArray *devicesArr = json[@"devices"];
+        if ([devicesArr isKindOfClass:[NSArray class]]) {
+            for (NSDictionary *dict in devicesArr) {
+                QCLANPeer *peer = [[QCLANPeer alloc] init];
+                peer.name     = dict[@"name"]     ?: @"Unknown";
+                peer.address  = dict[@"address"]  ?: @"";
+                peer.port     = [dict[@"port"] unsignedShortValue];
+                peer.pairCode = dict[@"pairCode"] ?: @"";
+                peer.peerId   = dict[@"peerId"]   ?: @"";
+                peer.paired   = [dict[@"paired"] boolValue];
+                [devices addObject:peer];
+            }
+        }
+        self.discoveredDevices = devices;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self buildUI];
+            if (devices.count == 0) {
+                [self showAlert:@"扫描完成"
+                        message:@"未发现局域网设备。请确认：\n\n1. 电脑端 QuickClipboard 已启动 HTTP 服务\n2. 手机和电脑在同一局域网\n3. 防火墙未阻止端口 35691/35693\n\n提示：可尝试电脑端通过 Bonjour 发现本设备\n服务名: _quickclipboard._tcp"];
+            }
+        });
+    }];
 }
+
+- (void)performPairWithAddress:(NSString *)addr code:(NSString *)code {
+    NSDictionary *body = @{@"address": addr, @"code": code, @"port": @(35691)};
+
+    [self apiPost:@"/pair" body:body completion:^(NSDictionary *json, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (json[@"ok"]) {
+                self.peerUrlField.text = @"";
+                self.peerCodeField.text = @"";
+                [self loadPeersFromServer];
+                [self showAlert:@"配对成功" message:@"设备已成功配对"];
+            } else {
+                NSString *msg = json[@"error"] ?: @"配对失败，请检查配对码是否正确";
+                [self showAlert:@"配对失败" message:msg];
+            }
+        });
+    }];
+}
+
+- (void)performRemovePeer:(NSString *)peerId {
+    NSString *encoded = [peerId stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+    NSString *path = [NSString stringWithFormat:@"/peers/%@", encoded];
+
+    [self apiDelete:path completion:^(NSDictionary *json, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self loadPeersFromServer];
+        });
+    }];
+}
+
+#pragma mark - HTTP Helpers
+
+- (void)apiGet:(NSString *)path completion:(void (^)(NSDictionary *json, NSError *error))completion {
+    NSString *urlStr = [kLocalBaseURL stringByAppendingString:path];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:8.0];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) {
+            if (completion) completion(nil, err);
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (completion) completion(json, nil);
+    }] resume];
+}
+
+- (void)apiPost:(NSString *)path body:(NSDictionary *)body completion:(void (^)(NSDictionary *json, NSError *error))completion {
+    NSString *urlStr = [kLocalBaseURL stringByAppendingString:path];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:8.0];
+    req.HTTPMethod = @"POST";
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) {
+            if (completion) completion(nil, err);
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (completion) completion(json, nil);
+    }] resume];
+}
+
+- (void)apiDelete:(NSString *)path completion:(void (^)(NSDictionary *json, NSError *error))completion {
+    NSString *urlStr = [kLocalBaseURL stringByAppendingString:path];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:8.0];
+    req.HTTPMethod = @"DELETE";
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err || !data) {
+            if (completion) completion(nil, err);
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (completion) completion(json, nil);
+    }] resume];
+}
+
 
 #pragma mark - UI Builder
 
@@ -258,13 +372,11 @@ static const void *kPeerIdKey = &kPeerIdKey;
     QCLANCardView *svcCard = [[QCLANCardView alloc] initWithTitle:@"HTTP 服务"];
     [self.scrollView addSubview:svcCard];
 
-    // Toggle row
     UIView *toggleRow = [self toggleRowWithLabel:self.httpRunning ? @"运行中" : @"已停止"
-                                        subtitle:@"局域网剪贴板同步服务"
+                                        subtitle:@"局域网剪贴板同步服务 (运行于 SpringBoard)"
                                            isOn:self.httpRunning
                                          action:@selector(serviceToggled:)];
 
-    // Status pills
     UIView *pillsRow = [[UIView alloc] init];
     pillsRow.translatesAutoresizingMaskIntoConstraints = NO;
     [svcCard.contentView addSubview:pillsRow];
@@ -311,12 +423,11 @@ static const void *kPeerIdKey = &kPeerIdKey;
     UIView *lastView = svcCard;
 
     // ==========================================
-    // Card 2: Local Info (Pairing Code + Endpoints)
+    // Card 2: Local Info
     // ==========================================
     QCLANCardView *localCard = [[QCLANCardView alloc] initWithTitle:@"本机信息"];
     [self.scrollView addSubview:localCard];
 
-    // Pairing code header
     UILabel *pcTitle = [[UILabel alloc] init];
     pcTitle.text = @"配对码";
     pcTitle.font = [UIFont systemFontOfSize:12];
@@ -338,9 +449,8 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [refreshBtn addTarget:self action:@selector(refreshPairingCode) forControlEvents:UIControlEventTouchUpInside];
     [localCard.contentView addSubview:refreshBtn];
 
-    // Code display
     self.codeLabel = [[UILabel alloc] init];
-    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"••••••";
+    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
     self.codeLabel.font = [UIFont monospacedSystemFontOfSize:32 weight:UIFontWeightMedium];
     self.codeLabel.textAlignment = NSTextAlignmentCenter;
     self.codeLabel.textColor = [UIColor labelColor];
@@ -352,7 +462,6 @@ static const void *kPeerIdKey = &kPeerIdKey;
     self.codeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [localCard.contentView addSubview:self.codeLabel];
 
-    // Endpoints
     UILabel *epTitle = [[UILabel alloc] init];
     epTitle.text = @"本机地址";
     epTitle.font = [UIFont systemFontOfSize:12];
@@ -367,6 +476,14 @@ static const void *kPeerIdKey = &kPeerIdKey;
     self.endpointLabel.numberOfLines = 0;
     self.endpointLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [localCard.contentView addSubview:self.endpointLabel];
+
+    // Bonjour info
+    UILabel *bonjourLabel = [[UILabel alloc] init];
+    bonjourLabel.text = @"Bonjour: _quickclipboard._tcp (可被电脑端自动发现)";
+    bonjourLabel.font = [UIFont systemFontOfSize:10];
+    bonjourLabel.textColor = [UIColor tertiaryLabelColor];
+    bonjourLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [localCard.contentView addSubview:bonjourLabel];
 
     [NSLayoutConstraint activateConstraints:@[
         [pcTitle.topAnchor constraintEqualToAnchor:localCard.contentView.topAnchor],
@@ -388,7 +505,11 @@ static const void *kPeerIdKey = &kPeerIdKey;
         [self.endpointLabel.topAnchor constraintEqualToAnchor:epTitle.bottomAnchor constant:4],
         [self.endpointLabel.leadingAnchor constraintEqualToAnchor:localCard.contentView.leadingAnchor],
         [self.endpointLabel.trailingAnchor constraintEqualToAnchor:localCard.contentView.trailingAnchor],
-        [self.endpointLabel.bottomAnchor constraintEqualToAnchor:localCard.contentView.bottomAnchor],
+
+        [bonjourLabel.topAnchor constraintEqualToAnchor:self.endpointLabel.bottomAnchor constant:4],
+        [bonjourLabel.leadingAnchor constraintEqualToAnchor:localCard.contentView.leadingAnchor],
+        [bonjourLabel.trailingAnchor constraintEqualToAnchor:localCard.contentView.trailingAnchor],
+        [bonjourLabel.bottomAnchor constraintEqualToAnchor:localCard.contentView.bottomAnchor],
     ]];
 
     localCard.translatesAutoresizingMaskIntoConstraints = NO;
@@ -400,37 +521,54 @@ static const void *kPeerIdKey = &kPeerIdKey;
     lastView = localCard;
 
     // ==========================================
-    // Card 3: Connect Device (Scan + Manual Pair)
+    // Card 3: Connect Device
     // ==========================================
     QCLANCardView *connectCard = [[QCLANCardView alloc] initWithTitle:@"连接设备"];
     [self.scrollView addSubview:connectCard];
 
-    // Scan button
     UIButton *scanBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [scanBtn setTitle:self.isScanning ? @"⏳ 扫描中..." : @"📡 扫描局域网" forState:UIControlStateNormal];
+    [scanBtn setTitle:self.isScanning ? @"扫描中..." : @"扫描局域网" forState:UIControlStateNormal];
     scanBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-    scanBtn.backgroundColor = [UIColor systemBlueColor];
+    scanBtn.backgroundColor = self.isScanning ? [UIColor systemGrayColor] : [UIColor systemBlueColor];
     [scanBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     scanBtn.layer.cornerRadius = 10;
+    scanBtn.enabled = !self.isScanning;
     scanBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [scanBtn addTarget:self action:@selector(scanLan) forControlEvents:UIControlEventTouchUpInside];
     [connectCard.contentView addSubview:scanBtn];
 
-    // Discovered devices list (shown after scan)
+    // Discovered devices
     UIView *discoveredContainer = [[UIView alloc] init];
-    discoveredContainer.tag = 700; // for finding later
     discoveredContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    discoveredContainer.hidden = YES;
     [connectCard.contentView addSubview:discoveredContainer];
 
-    // Divider line
+    if (self.discoveredDevices.count > 0) {
+        UIView *prevRow = nil;
+        for (QCLANPeer *peer in self.discoveredDevices) {
+            UIView *row = [self discoveredDeviceRow:peer];
+            row.translatesAutoresizingMaskIntoConstraints = NO;
+            [discoveredContainer addSubview:row];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [row.leadingAnchor constraintEqualToAnchor:discoveredContainer.leadingAnchor],
+                [row.trailingAnchor constraintEqualToAnchor:discoveredContainer.trailingAnchor],
+                [row.heightAnchor constraintEqualToConstant:56],
+            ]];
+            if (prevRow) {
+                [row.topAnchor constraintEqualToAnchor:prevRow.bottomAnchor constant:6].active = YES;
+            } else {
+                [row.topAnchor constraintEqualToAnchor:discoveredContainer.topAnchor].active = YES;
+            }
+            prevRow = row;
+        }
+        [discoveredContainer.bottomAnchor constraintEqualToAnchor:prevRow.bottomAnchor].active = YES;
+    }
+
     UIView *divider = [[UIView alloc] init];
     divider.backgroundColor = [UIColor separatorColor];
     divider.translatesAutoresizingMaskIntoConstraints = NO;
-    divider.tag = 701;
     [connectCard.contentView addSubview:divider];
 
-    // Manual pair fields
     UILabel *manualTitle = [[UILabel alloc] init];
     manualTitle.text = @"手动配对";
     manualTitle.font = [UIFont systemFontOfSize:12];
@@ -497,7 +635,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
         [pairBtn.trailingAnchor constraintEqualToAnchor:connectCard.contentView.trailingAnchor],
         [pairBtn.widthAnchor constraintEqualToConstant:72],
         [pairBtn.heightAnchor constraintEqualToConstant:38],
-        [pairBtn.bottomAnchor constraintEqualToAnchor:connectCard.contentView.bottomAnchor],
+        [connectCard.contentView.bottomAnchor constraintEqualToAnchor:pairBtn.bottomAnchor],
     ]];
 
     connectCard.translatesAutoresizingMaskIntoConstraints = NO;
@@ -517,7 +655,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
     if (self.pairedDevices.count > 0) {
         UIView *prevRow = nil;
         for (QCLANPeer *peer in self.pairedDevices) {
-            UIView *row = [self deviceRowForPeer:peer];
+            UIView *row = [self pairedDeviceRow:peer];
             row.translatesAutoresizingMaskIntoConstraints = NO;
             [pairedCard.contentView addSubview:row];
 
@@ -612,6 +750,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
     ]];
 }
 
+
 #pragma mark - Reusable Rows
 
 - (UIView *)toggleRowWithLabel:(NSString *)label subtitle:(NSString *)subtitle isOn:(BOOL)isOn action:(SEL)action {
@@ -651,13 +790,77 @@ static const void *kPeerIdKey = &kPeerIdKey;
     return row;
 }
 
-- (UIView *)deviceRowForPeer:(QCLANPeer *)peer {
+- (UIView *)discoveredDeviceRow:(QCLANPeer *)peer {
     UIView *row = [[UIView alloc] init];
     row.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
     row.layer.cornerRadius = 10;
     row.layer.masksToBounds = YES;
 
-    // Icon placeholder
+    UILabel *nameLabel = [[UILabel alloc] init];
+    nameLabel.text = peer.name ?: @"未知设备";
+    nameLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    nameLabel.textColor = peer.paired ? [UIColor systemGreenColor] : [UIColor labelColor];
+    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:nameLabel];
+
+    UILabel *addrLabel = [[UILabel alloc] init];
+    addrLabel.text = [NSString stringWithFormat:@"%@:%hu  |  配对码: %@", peer.address, peer.port, peer.pairCode];
+    addrLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    addrLabel.textColor = [UIColor secondaryLabelColor];
+    addrLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:addrLabel];
+
+    if (peer.paired) {
+        UILabel *pairedBadge = [[UILabel alloc] init];
+        pairedBadge.text = @"已配对";
+        pairedBadge.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+        pairedBadge.textColor = [UIColor systemGreenColor];
+        pairedBadge.translatesAutoresizingMaskIntoConstraints = NO;
+        [row addSubview:pairedBadge];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [pairedBadge.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-10],
+            [pairedBadge.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        ]];
+    } else {
+        UIButton *quickPairBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [quickPairBtn setTitle:@"配对" forState:UIControlStateNormal];
+        quickPairBtn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+        quickPairBtn.backgroundColor = [UIColor systemGreenColor];
+        [quickPairBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        quickPairBtn.layer.cornerRadius = 6;
+        quickPairBtn.translatesAutoresizingMaskIntoConstraints = NO;
+        quickPairBtn.peerId = peer.peerId;
+        [quickPairBtn addTarget:self action:@selector(quickPairDiscovered:) forControlEvents:UIControlEventTouchUpInside];
+        [row addSubview:quickPairBtn];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [quickPairBtn.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-8],
+            [quickPairBtn.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+            [quickPairBtn.widthAnchor constraintEqualToConstant:48],
+            [quickPairBtn.heightAnchor constraintEqualToConstant:26],
+        ]];
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [nameLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:10],
+        [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor constant:8],
+        [nameLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-60],
+
+        [addrLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:10],
+        [addrLabel.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:2],
+        [addrLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-60],
+    ]];
+
+    return row;
+}
+
+- (UIView *)pairedDeviceRow:(QCLANPeer *)peer {
+    UIView *row = [[UIView alloc] init];
+    row.backgroundColor = [UIColor tertiarySystemGroupedBackgroundColor];
+    row.layer.cornerRadius = 10;
+    row.layer.masksToBounds = YES;
+
     UIView *iconView = [[UIView alloc] init];
     iconView.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.15];
     iconView.layer.cornerRadius = 18;
@@ -665,13 +868,12 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [row addSubview:iconView];
 
     UILabel *iconLabel = [[UILabel alloc] init];
-    iconLabel.text = @"🖥";
+    iconLabel.text = @"\U0001f4bb";
     iconLabel.font = [UIFont systemFontOfSize:18];
     iconLabel.textAlignment = NSTextAlignmentCenter;
     iconLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [iconView addSubview:iconLabel];
 
-    // Name
     UILabel *nameLabel = [[UILabel alloc] init];
     nameLabel.text = peer.name ?: @"未知设备";
     nameLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
@@ -679,7 +881,6 @@ static const void *kPeerIdKey = &kPeerIdKey;
     nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [row addSubview:nameLabel];
 
-    // Address
     UILabel *addrLabel = [[UILabel alloc] init];
     addrLabel.text = [NSString stringWithFormat:@"%@:%hu", peer.address, peer.port];
     addrLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
@@ -687,22 +888,18 @@ static const void *kPeerIdKey = &kPeerIdKey;
     addrLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [row addSubview:addrLabel];
 
-    // Time
     UILabel *timeLabel = [[UILabel alloc] init];
     if (peer.lastSeen) {
         NSTimeInterval ago = -[peer.lastSeen timeIntervalSinceNow];
         if (ago < 60) timeLabel.text = @"刚刚";
         else if (ago < 3600) timeLabel.text = [NSString stringWithFormat:@"%d分钟前", (int)(ago / 60)];
         else timeLabel.text = [NSString stringWithFormat:@"%d小时前", (int)(ago / 3600)];
-    } else {
-        timeLabel.text = @"";
     }
     timeLabel.font = [UIFont systemFontOfSize:10];
     timeLabel.textColor = [UIColor tertiaryLabelColor];
     timeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [row addSubview:timeLabel];
 
-    // Push button
     UIButton *pushBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [pushBtn setTitle:@"推送" forState:UIControlStateNormal];
     pushBtn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
@@ -710,11 +907,10 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [pushBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     pushBtn.layer.cornerRadius = 6;
     pushBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    pushBtn.peerId = peer.peerId; // Store peer ID
+    pushBtn.peerId = peer.peerId;
     [pushBtn addTarget:self action:@selector(pushToDevice:) forControlEvents:UIControlEventTouchUpInside];
     [row addSubview:pushBtn];
 
-    // Delete button
     UIButton *delBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [delBtn setTitle:@"删除" forState:UIControlStateNormal];
     delBtn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
@@ -722,7 +918,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [delBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     delBtn.layer.cornerRadius = 6;
     delBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    delBtn.peerId = peer.peerId; // Store peer ID
+    delBtn.peerId = peer.peerId;
     [delBtn addTarget:self action:@selector(removeDevice:) forControlEvents:UIControlEventTouchUpInside];
     [row addSubview:delBtn];
 
@@ -758,173 +954,33 @@ static const void *kPeerIdKey = &kPeerIdKey;
     return row;
 }
 
-#pragma mark - Discovery (UDP Scan)
-
-- (void)startDiscoveryListener {
-    [self stopDiscovery];
-
-    dispatch_async(self.scanQueue, ^{
-        self.discoverySocket = socket(AF_INET, SOCK_DGRAM, 0);
-        if (self.discoverySocket < 0) return;
-
-        int on = 1;
-        setsockopt(self.discoverySocket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-        setsockopt(self.discoverySocket, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
-
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(35694); // Different port from server to avoid conflict
-        addr.sin_addr.s_addr = INADDR_ANY;
-
-        if (bind(self.discoverySocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            close(self.discoverySocket);
-            self.discoverySocket = 0;
-            return;
-        }
-
-        // Set timeout for the scan
-        struct timeval tv;
-        tv.tv_sec = 3;
-        tv.tv_usec = 0;
-        setsockopt(self.discoverySocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        // Send discovery broadcast
-        [self sendDiscoveryBroadcast];
-
-        // Listen for replies
-        char buffer[1024];
-        struct timeval start, now;
-        gettimeofday(&start, NULL);
-
-        while (1) {
-            gettimeofday(&now, NULL);
-            double elapsed = (now.tv_sec - start.tv_sec) + (now.tv_usec - start.tv_usec) / 1000000.0;
-            if (elapsed > 2.5) break;
-
-            struct sockaddr_in senderAddr;
-            socklen_t senderLen = sizeof(senderAddr);
-            ssize_t len = recvfrom(self.discoverySocket, buffer, sizeof(buffer) - 1, 0,
-                                   (struct sockaddr *)&senderAddr, &senderLen);
-            if (len <= 0) continue;
-            buffer[len] = '\0';
-            NSString *msg = [NSString stringWithUTF8String:buffer];
-
-            // Format: QC_HERE|DeviceName|Port|PairCode
-            if ([msg hasPrefix:@"QC_HERE"]) {
-                NSArray *parts = [msg componentsSeparatedByString:@"|"];
-                if (parts.count >= 4) {
-                    NSString *name = parts[1];
-                    uint16_t port = (uint16_t)[parts[2] intValue];
-                    NSString *code = parts[3];
-                    NSString *ip = [NSString stringWithUTF8String:inet_ntoa(senderAddr.sin_addr)];
-
-                    QCLANPeer *peer = [[QCLANPeer alloc] init];
-                    peer.name     = name;
-                    peer.address  = ip;
-                    peer.port     = port;
-                    peer.pairCode = code;
-                    peer.peerId   = [NSString stringWithFormat:@"%@:%hu", ip, port];
-                    peer.lastSeen = [NSDate date];
-                    // Check if already paired
-                    for (QCLANPeer *p in self.pairedDevices) {
-                        if ([p.peerId isEqualToString:peer.peerId]) {
-                            peer.paired = YES;
-                            peer.name = p.name;
-                            break;
-                        }
-                    }
-                    self.scanResults[peer.peerId] = peer;
-                }
-            }
-
-            // Resend broadcast periodically
-            if (elapsed > 0.5 && elapsed < 0.6) {
-                [self sendDiscoveryBroadcast];
-            }
-        }
-
-        close(self.discoverySocket);
-        self.discoverySocket = 0;
-
-        NSArray *results = [self.scanResults.allValues sortedArrayUsingComparator:^NSComparisonResult(QCLANPeer *a, QCLANPeer *b) {
-            return [a.name compare:b.name];
-        }];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self onScanComplete:results];
-        });
-    });
-}
-
-- (void)sendDiscoveryBroadcast {
-    if (self.discoverySocket <= 0) return;
-    NSData *data = [@"QC_DISCOVER" dataUsingEncoding:NSUTF8StringEncoding];
-
-    struct sockaddr_in broadAddr;
-    memset(&broadAddr, 0, sizeof(broadAddr));
-    broadAddr.sin_family = AF_INET;
-    broadAddr.sin_port = htons(35693);
-    broadAddr.sin_addr.s_addr = inet_addr("255.255.255.255");
-    sendto(self.discoverySocket, data.bytes, data.length, 0,
-           (struct sockaddr *)&broadAddr, sizeof(broadAddr));
-}
-
-- (void)stopDiscovery {
-    if (self.discoverySocket > 0) {
-        close(self.discoverySocket);
-        self.discoverySocket = 0;
-    }
-}
-
-- (void)onScanComplete:(NSArray<QCLANPeer *> *)results {
-    self.isScanning = NO;
-    self.discoveredDevices = results;
-    [self buildUI];
-
-    if (results.count == 0) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"扫描完成"
-                                                                       message:@"未发现局域网设备。请确认：\n1. 电脑端 QuickClipboard 已启动且开启 HTTP 服务\n2. 手机和电脑在同一局域网\n3. 防火墙未阻止端口 35691/35693"
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-}
 
 #pragma mark - Actions
 
 - (void)serviceToggled:(UISwitch *)sender {
-    self.receiveEnabled = sender.on;
+    // The tweak process always runs the server. This toggle is for intent.
     self.httpRunning = sender.on;
-    [self.defaults setBool:self.receiveEnabled forKey:@"lanReceiveEnabled"];
+    [self.defaults setBool:self.httpRunning forKey:@"lanReceiveEnabled"];
     [self.defaults synchronize];
     [self buildUI];
 }
 
 - (void)togglePairCodeVisibility {
     self.pairCodeVisible = !self.pairCodeVisible;
-    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"••••••";
+    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
 }
 
 - (void)refreshPairingCode {
     uint32_t code = arc4random_uniform(900000) + 100000;
     self.pairingCode = [NSString stringWithFormat:@"%06u", code];
-    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"••••••";
+    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
     [self.defaults setObject:self.pairingCode forKey:@"lanPairingCode"];
     [self.defaults synchronize];
 }
 
 - (void)scanLan {
     if (self.isScanning) return;
-    self.isScanning = YES;
-    self.discoveredDevices = nil;
-    [self.scanResults removeAllObjects];
-    [self buildUI];
-
-    // Show scanning feedback
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self startDiscoveryListener];
-    });
+    [self performScanViaServer];
 }
 
 - (void)pairDevice {
@@ -939,17 +995,26 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [self.peerUrlField resignFirstResponder];
     [self.peerCodeField resignFirstResponder];
 
-    [[QCLANServer sharedServer] pairWithAddress:addr code:code completion:^(BOOL success, NSString *message) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (success) {
-                [self reloadPairedDevices];
-                [self buildUI];
-                self.peerUrlField.text = @"";
-                self.peerCodeField.text = @"";
-            }
-            [self showAlert:success ? @"配对成功" : @"配对失败" message:message];
-        });
-    }];
+    [self performPairWithAddress:addr code:code];
+}
+
+- (void)quickPairDiscovered:(UIButton *)sender {
+    NSString *peerId = sender.peerId;
+    QCLANPeer *peer = nil;
+    for (QCLANPeer *p in self.discoveredDevices) {
+        if ([p.peerId isEqualToString:peerId]) { peer = p; break; }
+    }
+    if (!peer) return;
+
+    // Ask for verification since we already have the code
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"确认配对"
+                                                                   message:[NSString stringWithFormat:@"与 %@ (%@) 配对？\n配对码: %@", peer.name, peer.address, peer.pairCode]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"配对" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self performPairWithAddress:peer.address code:peer.pairCode];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)pushToDevice:(UIButton *)sender {
@@ -978,10 +1043,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"移除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        // Delete the correct peer from the server
-        [[QCLANServer sharedServer] removePeer:peer];
-        [self reloadPairedDevices];
-        [self buildUI];
+        [self performRemovePeer:peerId];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -1005,7 +1067,30 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [self.defaults synchronize];
 }
 
+
 #pragma mark - Helpers
+
+- (NSString *)getLocalIPAddress {
+    struct ifaddrs *ifaddr = NULL;
+    if (getifaddrs(&ifaddr) != 0) return nil;
+    NSString *ip = nil;
+    for (struct ifaddrs *ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        if (strncmp(ifa->ifa_name, "en", 2) == 0 || strncmp(ifa->ifa_name, "pdp_ip", 6) == 0) {
+            char addrBuf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr, addrBuf, sizeof(addrBuf));
+            ip = [NSString stringWithUTF8String:addrBuf];
+            break;
+        }
+    }
+    freeifaddrs(ifaddr);
+    return ip;
+}
+
+- (NSInteger)clipCount {
+    NSArray *items = [[QCStore sharedStore] allItems];
+    return items ? items.count : 0;
+}
 
 - (QCLANPeer *)findPeerById:(NSString *)peerId {
     for (QCLANPeer *p in self.pairedDevices) {

@@ -3,7 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface QCLANPeer : NSObject
-@property (nonatomic, strong) NSString *peerId;       // unique: address:port
+@property (nonatomic, strong) NSString *peerId;
 @property (nonatomic, strong) NSString *name;
 @property (nonatomic, strong) NSString *address;
 @property (nonatomic, assign) uint16_t port;
@@ -13,26 +13,36 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 @interface QCLANServer : NSObject
+
 + (instancetype)sharedServer;
+
 @property (nonatomic, assign, readonly) uint16_t port;
 @property (nonatomic, strong, readonly) NSString *pairCode;
 @property (nonatomic, strong, readonly) NSArray<QCLANPeer *> *pairedDevices;
-@property (nonatomic, strong, readonly) NSArray<QCLANPeer *> *discoveredDevices;
+@property (nonatomic, assign, readonly) BOOL isRunning;
 
 - (void)start;
 - (void)stop;
-- (void)broadcastChange;
 
-// Scanning
+#pragma mark - Scanning (runs UDP discovery, returns discovered devices)
+
 - (void)scanForDevicesWithCompletion:(void (^)(NSArray<QCLANPeer *> *devices))completion;
 
-// Pairing
-- (void)pairWithAddress:(NSString *)address code:(NSString *)code completion:(void (^)(BOOL success, NSString *message))completion;
+#pragma mark - Pairing (validates pair code)
 
-// Device management
+- (void)pairWithAddress:(NSString *)address
+                 port:(uint16_t)port
+                 code:(NSString *)code
+           completion:(void (^)(BOOL success, NSString * _Nullable message))completion;
+
+#pragma mark - Peer management
+
+- (void)reloadPeers;
 - (void)removePeer:(QCLANPeer *)peer;
 
-// Sync
+#pragma mark - Sync
+
+- (void)broadcastChange;
 - (void)pushToPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
 - (void)pullFromPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
 
