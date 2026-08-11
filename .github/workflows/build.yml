@@ -12,9 +12,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify source version
+        id: version
+        run: |
+          echo "=== control file ==="
+          cat layout/DEBIAN/control
+          VERSION=$(grep '^Version:' layout/DEBIAN/control | awk '{print $2}')
+          echo "CONTROL_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Version from source: $VERSION"
+
       - name: Install Theos dependencies
         run: |
-          brew install ldid make || true
+          brew install ldid make dpkg || true
           brew unlink ldid && brew link ldid || true
 
       - name: Cache Theos
@@ -22,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /Users/runner/theos
-          key: theos-macos-${{ runner.os }}-2026
+          key: theos-macos-${{ runner.os }}-v2
 
       - name: Install Theos
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -36,16 +45,16 @@ jobs:
           echo "THEOS=/Users/runner/theos" >> $GITHUB_ENV
           echo "/Users/runner/theos/bin" >> $GITHUB_PATH
 
-      - name: Fetch patched SDK with private frameworks
+      - name: Fetch patched SDK
         run: |
           THEOS=/Users/runner/theos
           if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
             git clone --depth 1 https://github.com/theos/sdks /tmp/qc-sdks || true
             cp -R /tmp/qc-sdks/* $THEOS/sdks/ 2>/dev/null || true
           fi
-          ls $THEOS/sdks/ || true
+          ls $THEOS/sdks/
 
-      - name: "Fallback - link Xcode iPhoneOS SDK"
+      - name: Fallback SDK
         run: |
           THEOS=/Users/runner/theos
           if [ ! -d "$THEOS/sdks/iPhoneOS.sdk" ]; then
@@ -53,22 +62,60 @@ jobs:
             ln -s "$SDK_PATH" "$THEOS/sdks/iPhoneOS.sdk"
           fi
 
-      - name: Fix maintainer script permissions
+      - name: Fix permissions
         run: |
           chmod 755 layout/DEBIAN/postinst layout/DEBIAN/prerm 2>/dev/null || true
-          ls -la layout/DEBIAN/
 
-      - name: Build package
+      - name: Full clean
         run: |
-          make clean || true
+          make clean 2>/dev/null || true
+          rm -rf .theos .theos-obj obj packages
+          echo "Cleaned"
+
+      - name: Build with explicit version override
+        run: |
+          echo "=== Building version: $CONTROL_VERSION ==="
+          # Write version directly into a temp control in Theos layout format
+          mkdir -p layout/DEBIAN
+          cat > layout/DEBIAN/control << CTRLFILE
+          Package: com.mosheng.quickclipboard
+          Name: QuickClipboard
+          Depends: mobilesubstrate, preferenceloader, firmware (>= 15.0)
+          Version: ${CONTROL_VERSION}
+          Architecture: iphoneos-arm64
+          Description: A cross-platform clipboard enhancement tweak.
+          Maintainer: mosheng
+          Author: mosheng
+          Section: Tweaks
+          CTRLFILE
+          echo "--- control after rewrite ---"
+          cat layout/DEBIAN/control
+          # Build
           make package FINALPACKAGE=1
 
-      - name: Verify deb
+      - name: Verify built deb
         run: |
-          ls -la packages/
-          for f in packages/*.deb; do
-            dpkg-deb -I "$f" || true
+          echo "=== Generated packages ==="
+          ls -la packages/ 2>/dev/null || echo "No packages dir"
+          find . -name "*.deb" -type f | while read deb; do
+            echo "=== Deb: $deb ==="
+            echo "Filename: $(basename $deb)"
+            dpkg-deb -I "$deb" | grep -E '^( Package:| Version:| Architecture:)'
+            echo ""
           done
+
+      - name: Check version match
+        run: |
+          EXPECTED="$CONTROL_VERSION"
+          find . -name "*.deb" -type f | while read deb; do
+            ACTUAL=$(dpkg-deb -I "$deb" | grep '^ Version:' | awk '{print $2}')
+            echo "Expected: $EXPECTED, Actual: $ACTUAL, File: $deb"
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "ERROR: Version mismatch!"
+              exit 1
+            fi
+          done
+          echo "=== VERSION CHECK PASSED ==="
 
       - name: Upload deb artifact
         if: success()
@@ -78,13 +125,3 @@ jobs:
           path: packages/*.deb
           retention-days: 30
           if-no-files-found: error
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: |
-            packages/*.log
-            theos.log
-            *.log

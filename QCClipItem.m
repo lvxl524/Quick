@@ -4,6 +4,7 @@
 NSString * const QCClipDidChangeNotification = @"com.mosheng.quickclipboard.clipChanged";
 NSString * const QCWebDAVSyncRequestNotification = @"com.mosheng.quickclipboard.webdavSync";
 NSString * const QCLANDevicePairedNotification = @"com.mosheng.quickclipboard.lanPaired";
+NSString * const QCLANSyncReceivedNotification = @"com.mosheng.quickclipboard.lanSyncReceived";
 
 @implementation QCClipItem
 

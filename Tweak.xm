@@ -37,6 +37,8 @@ static BOOL QCShouldCapturePasteboard(UIPasteboard *pb) {
     @autoreleasepool {
         NSLog(@"[QuickClipboard] Tweak loaded");
         [[QCLANServer sharedServer] start];
+        // Ensure QCClipManager is initialized so notification observers are registered
+        [QCClipManager sharedManager];
     }
 }
 

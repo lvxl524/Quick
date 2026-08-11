@@ -27,6 +27,7 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
     self = [super init];
     if (self) {
         _worker = dispatch_queue_create("com.mosheng.quickclipboard.manager", DISPATCH_QUEUE_SERIAL);
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleLANSyncReceived:) name:QCLANSyncReceivedNotification object:nil];
     }
     return self;
 }
@@ -124,6 +125,20 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 - (void)triggerAutoSync {
     [[QCWebDAVClient sharedClient] performAutoSyncIfEnabled];
     [[QCLANServer sharedServer] broadcastChange];
+}
+
+- (void)handleLANSyncReceived:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSInteger count = [note.userInfo[@"count"] integerValue];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        UILocalNotification *localNotif = [[UILocalNotification alloc] init];
+        localNotif.alertTitle = @"QuickClipboard";
+        localNotif.alertBody = [NSString stringWithFormat:@"收到 %ld 条剪贴板同步内容", (long)count];
+        localNotif.soundName = UILocalNotificationDefaultSoundName;
+        [[UIApplication sharedApplication] presentLocalNotificationNow:localNotif];
+#pragma clang diagnostic pop
+    });
 }
 
 - (NSString *)deviceID {
