@@ -2,10 +2,13 @@
 #import <UIKit/UIKit.h>
 
 #define QC_PREFS_PATH @"/var/mobile/Library/Preferences/com.mosheng.quickclipboard.plist"
+// v1.3.19: 已配对设备清单迁移到 Preferences 目录 (与 QC_PREFS_PATH 同目录, 沙箱 Preferences.app 可正常读写)。
+// 旧路径 /var/mobile/Library/QuickClipboard/peers.plist 在沙箱下被拦截, 导致设置页"已配对设备"始终为空。
+#define QC_PEERS_PATH @"/var/mobile/Library/Preferences/com.mosheng.quickclipboard.peers.plist"
 #define QC_DB_PATH @"/var/mobile/Library/QuickClipboard/clipboard.db"
 #define QC_SYNC_DIR @"/var/mobile/Library/QuickClipboard/sync"
 #define QC_CLOUD_ENCRYPTION_KEY_PREF @"cloudEncryptionKey"
-#define QC_VERSION @"1.3.18"
+#define QC_VERSION @"1.3.19"
 
 extern NSString * const QCClipDidChangeNotification;
 extern NSString * const QCWebDAVSyncRequestNotification;

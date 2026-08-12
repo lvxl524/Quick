@@ -190,8 +190,15 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
 #pragma mark - Peer Persistence (新格式: device_id / base_url / peer_token)
 
 - (void)loadPeers {
-    NSString *path = @"/var/mobile/Library/QuickClipboard/peers.plist";
+    // v1.3.19: peers 清单迁到 Preferences 目录 (与 QC_PREFS_PATH 同目录), 沙箱 Preferences.app 可正常读写。
+    // 旧路径 /var/mobile/Library/QuickClipboard/peers.plist 在沙箱下被拦截, 导致设置页"已配对设备"始终为空。
+    NSString *path = QC_PEERS_PATH;
+    NSString *oldPath = @"/var/mobile/Library/QuickClipboard/peers.plist";
     NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path] && [fm fileExistsAtPath:oldPath]) {
+        [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"迁移 peers 清单到沙箱可访问路径: %@", path];
+        [fm moveItemAtPath:oldPath toPath:path error:nil];
+    }
     NSDictionary *fileAttrs = [fm attributesOfItemAtPath:path error:nil];
     NSArray *arr = [NSArray arrayWithContentsOfFile:path];
     // v1.3.13: 诊断日志 —— 文件是否存在/大小, 帮助区分"写盘失败"与"读取失败"
@@ -242,9 +249,10 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
 }
 
 - (void)savePeers {
-    NSString *dir = @"/var/mobile/Library/QuickClipboard";
+    // v1.3.19: 写入沙箱可访问的 Preferences 目录 (同 QC_PREFS_PATH)
+    NSString *dir = @"/var/mobile/Library/Preferences";
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *path = [dir stringByAppendingPathComponent:@"peers.plist"];
+    NSString *path = QC_PEERS_PATH;
     NSMutableArray *arr = [NSMutableArray array];
     for (QCLANPeer *peer in _peers) {
         [arr addObject:@{
@@ -348,6 +356,16 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
     });
 }
 
+// v1.3.19: 端口被占用时, 尝试让当前持有端口的实例(支持 /control/relinquish 的 v1.3.19+ 版本)主动退出,
+// 以便本实例接管。对不支持该端点的极旧实例无效, 此时需用户重启手机清理陈旧守护进程。
+// 注意: 走 /control/relinquish (只停服务、不改 lanServiceEnabled), 避免误把用户的开关状态写成关闭。
+- (void)requestHolderStop {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *url = [NSString stringWithFormat:@"http://127.0.0.1:%d", kDefaultLANPort];
+        [self httpPostJSON:url path:@"/control/relinquish" body:@{} timeout:3.0];
+    });
+}
+
 
 #pragma mark - HTTP Server (桌面端兼容 /qc-sync/* 端点)
 
@@ -373,6 +391,8 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
         [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"HTTP 端口 %d 绑定失败: %s (可能被其他进程占用)", kDefaultLANPort, strerror(errno)];
         close(_listenSocket);
         _listenSocket = 0;
+        // v1.3.19: 先请求占用端口的实例让出 (支持 /control/relinquish 的新版本会退出), 再重试接管。
+        [self requestHolderStop];
         // v1.3.10: 自动重试接管端口。tweak 注入多个进程, 只有第一个能占用端口;
         // 若持有端口的进程被系统杀掉, 本进程 3 秒后重试绑定即可接管, 无需注销。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), _queue, ^{
@@ -621,6 +641,13 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
             responseData = [self jsonResponse:@{@"ok": @YES, @"running": @NO} statusCode:&statusCode];
         }
         [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"本地控制: 局域网服务主开关 -> %@", enabled ? @"开" : @"关"];
+
+    // POST /control/relinquish —— 仅 loopback: 让出端口 (只停服务, 不改 lanServiceEnabled 持久化),
+    // 供新版本实例在端口被旧实例占用时请求其退出。与 /control/lan-service(会持久化开关)区分。
+    } else if ([path isEqualToString:@"/control/relinquish"] && [method isEqualToString:@"POST"] && [address isEqualToString:kLoopbackIP]) {
+        [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"收到端口让出请求, 停止本实例服务"];
+        [self stop];
+        responseData = [self jsonResponse:@{@"ok": @YES} statusCode:&statusCode];
 
     // GET /scan —— 本地 UI 触发扫描
     } else if ([path isEqualToString:@"/scan"] && [method isEqualToString:@"GET"] && [address isEqualToString:kLoopbackIP]) {
@@ -1361,6 +1388,8 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
         [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"UDP 发现端口 %d 绑定失败: %s", kDiscoveryPort, strerror(errno)];
         close(_discoverySocket);
         _discoverySocket = 0;
+        // v1.3.19: 先请求占用端口的实例让出, 再重试接管。
+        [self requestHolderStop];
         // v1.3.10: 与 HTTP 端口同理, 自动重试接管 (持有者被杀后恢复发现能力)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), _discoveryQueue, ^{
             if (self->_running && self->_discoverySocket == 0) {
@@ -1524,6 +1553,13 @@ static void QCServiceControlNotify(CFNotificationCenterRef center, void *observe
 
     NSString *senderIP = senderAddr ? [NSString stringWithUTF8String:inet_ntoa(senderAddr->sin_addr)] : @"?";
     uint16_t port = httpPort ? [httpPort unsignedShortValue] : kDefaultLANPort;
+    // v1.3.19: 排除本机 IP —— 多实例/陈旧实例场景下, 本机发现监听器会把自身响应当成"另一台设备",
+    // 导致扫描列表出现本机 IP (日志中 4 个相同的 iPhone 13Pro Max(192.168.3.103))。
+    // 按 IP 排除比按 device_id 更稳妥: 即使陈旧实例 device_id 与当前不一致, 其响应仍来自本机 IP, 必被过滤。
+    if (senderIP.length > 0 && [[self localIPAddresses] containsObject:senderIP]) {
+        [[QCLANLogger sharedLogger] info:@"NET" fmt:@"扫描响应来自本机 IP(%@), 忽略", senderIP];
+        return;
+    }
     NSString *baseURL = [NSString stringWithFormat:@"http://%@:%hu", senderIP, port];
 
     QCLANPeer *peer = [[QCLANPeer alloc] init];
