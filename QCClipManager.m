@@ -260,7 +260,15 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 static id QCUNCenter(void) {
     Class cls = NSClassFromString(@"UNUserNotificationCenter");
     if (!cls) return nil;
-    return [cls performSelector:@selector(currentCenter)];
+    // v1.3.12 修复: 正确类方法是 currentNotificationCenter, 旧版误写 currentCenter
+    // 导致 unrecognized selector sent to class → SpringBoard 崩溃进安全模式。
+    // 双保险: respondsToSelector 检查 + performSelector, 任何异常直接返回 nil。
+    SEL sel = NSSelectorFromString(@"currentNotificationCenter");
+    if (![cls respondsToSelector:sel]) {
+        [[QCLANLogger sharedLogger] warn:@"NOTIFY" fmt:@"UNUserNotificationCenter 无 currentNotificationCenter, 跳过"];
+        return nil;
+    }
+    return [cls performSelector:sel];
 }
 
 - (void)handleLANSyncReceived:(NSNotification *)note {
