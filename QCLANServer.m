@@ -1,6 +1,7 @@
 #import "QCLANServer.h"
 #import "QCStore.h"
 #import "QCLANLogger.h"
+#import "QCLANPrefs.h"
 #import "QCClipManager.h"
 #import <UIKit/UIKit.h>
 #import <sys/socket.h>
@@ -108,15 +109,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 #pragma mark - Device Identity (与桌面端一致的持久化 UUID)
 
 - (NSString *)deviceId {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *stored = [defaults stringForKey:kDeviceIDDefaultsKey];
-    if (stored.length > 0) {
-        return stored;
-    }
-    NSString *newId = [[NSUUID UUID] UUIDString].lowercaseString;
-    [defaults setObject:newId forKey:kDeviceIDDefaultsKey];
-    [defaults synchronize];
-    return newId;
+    // 跨进程统一身份: 设置页(Preferences)与 SpringBoard 必须返回同一个值,
+    // 否则推送时 X-Device-Id 与桌面端配对时备案的 device_id 不匹配 -> 403
+    return [QCLANPrefs deviceId];
 }
 
 #pragma mark - Pairing Code (TTL + 尝试次数, 与桌面端一致)
@@ -875,7 +870,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         }
         if (changed.count > 0) {
             [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
-            BOOL notifyEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"lanSyncNotifyEnabled"];
+            BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
             if (notifyEnabled) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:QCLANSyncReceivedNotification
@@ -1612,7 +1607,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     }
     if (receivedNew) {
         [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
-        BOOL notifyEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"lanSyncNotifyEnabled"];
+        BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
         if (notifyEnabled) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCLANSyncReceivedNotification
@@ -1648,6 +1643,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSMutableArray *records = [NSMutableArray array];
     for (QCClipItem *item in items) {
         [records addObject:[self cloudRecordFromItem:item]];
+    }
+    if (records.count == 0) {
+        // 本机没有记录时明确提示, 避免"点了没反应"的困惑
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"推送跳过: 本机剪贴板暂无记录 (%@)", peer.baseURL];
+        if (completion) completion(NO, @"本机剪贴板暂无记录可推送");
+        return;
     }
     NSDictionary *batch = @{@"collection": @"history", @"records": records};
     NSData *json = [NSJSONSerialization dataWithJSONObject:batch options:0 error:nil];
@@ -1690,7 +1691,20 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         }
         if (completion) {
             if (ok) {
-                completion(YES, @"已推送");
+                // 桌面端增量同步: 响应体带 pushed 数量, 0 表示对方已是最新 (并非没反应)
+                NSInteger pushedCount = 0;
+                if ([respJson isKindOfClass:[NSDictionary class]]) {
+                    pushedCount = [respJson[@"pushed"] integerValue];
+                }
+                if (pushedCount > 0) {
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送成功: %@ (%ld 条)",
+                     peer.baseURL, (long)pushedCount];
+                    completion(YES, [NSString stringWithFormat:@"已推送 %ld 条记录", (long)pushedCount]);
+                } else {
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送完成: %@ (双方已同步, 0 条)",
+                     peer.baseURL];
+                    completion(YES, @"已同步，双方无新内容（0 条）");
+                }
             } else if (error) {
                 completion(NO, error.localizedDescription ?: @"推送失败");
             } else if (detail.length > 0) {

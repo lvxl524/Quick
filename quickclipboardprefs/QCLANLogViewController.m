@@ -19,7 +19,8 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"局域网日志";
+    // 版本号同时放进导航栏标题: 不依赖内容区布局, 确保任何情况下都可见
+    self.title = [NSString stringWithFormat:@"局域网日志 · v%@", QC_VERSION];
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
@@ -241,7 +242,7 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-// 导出完整日志: 复制到剪贴板 + 写入 /var/mobile/Media/QuickClipboard/ 便于取出
+// 导出完整日志: 写入临时文件后用系统分享面板 (可发送到微信/QQ/文件/备忘录等应用)
 - (void)exportTapped {
     NSArray *lines = [[QCLANLogger sharedLogger] displayLines:3000];
     NSMutableString *log = [NSMutableString string];
@@ -257,10 +258,7 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
         [log appendString:@"(暂无日志)\n"];
     }
 
-    // 1. 复制到剪贴板 (可直接粘贴发送)
-    [UIPasteboard generalPasteboard].string = log;
-
-    // 2. 写文件 (便于通过文件管理器取出)
+    // 写临时文件, 供分享面板作为文件附件发送
     NSString *dir = @"/var/mobile/Media/QuickClipboard";
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
 
@@ -268,19 +266,24 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
     fmt.dateFormat = @"yyyyMMdd_HHmmss";
     NSString *path = [dir stringByAppendingPathComponent:
                       [NSString stringWithFormat:@"lan_export_%@.txt", [fmt stringFromDate:[NSDate date]]]];
-    NSError *writeError = nil;
-    BOOL wrote = [log writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
-    if (!wrote) {
-        path = [NSString stringWithFormat:@"写入失败: %@", writeError.localizedDescription ?: @"未知错误"];
+    [log writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户导出日志 (%lu 行, 打开分享面板)", (unsigned long)lines.count];
+
+    // 系统分享面板: 文本 + 文件 URL, 可选择微信/QQ/文件/备忘录/隔空投送等
+    UIActivityViewController *avc = [[UIActivityViewController alloc]
+                                     initWithActivityItems:@[log, [NSURL fileURLWithPath:path]]
+                                     applicationActivities:nil];
+    // iPad 必须指定弹出锚点, 否则会崩溃
+    if (avc.popoverPresentationController) {
+        avc.popoverPresentationController.sourceView = self.view;
+        avc.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds),
+                                                                  CGRectGetMidY(self.view.bounds), 0, 0);
+        avc.popoverPresentationController.permittedArrowDirections = 0;
     }
-
-    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户导出日志 (%lu 行)", (unsigned long)lines.count];
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"日志已导出"
-                                                                   message:[NSString stringWithFormat:@"已复制 %lu 行日志到剪贴板，可直接粘贴发送。\n\n文件: %@", (unsigned long)lines.count, path]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    // 同时保留剪贴板副本, 兼容旧习惯
+    [UIPasteboard generalPasteboard].string = log;
+    [self presentViewController:avc animated:YES completion:nil];
 }
 
 @end

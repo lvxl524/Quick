@@ -1,4 +1,5 @@
 #import "QCLANLogger.h"
+#import "QCLANPrefs.h"
 #import <fcntl.h>
 #import <unistd.h>
 #import <errno.h>
@@ -109,15 +110,12 @@ static NSString * const kLoggingEnabledKey = @"lanLoggingEnabled";
 
 + (BOOL)isLoggingEnabled {
     // 默认开启: 未设置过该 key 时返回 YES
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if ([d objectForKey:kLoggingEnabledKey] == nil) return YES;
-    return [d boolForKey:kLoggingEnabledKey];
+    // 走共享 plist (QCLANPrefs): 设置页(Preferences)关闭后, SpringBoard 进程能立即读到
+    return [QCLANPrefs boolForKey:kLoggingEnabledKey defaultValue:YES];
 }
 
 + (void)setLoggingEnabled:(BOOL)enabled {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setBool:enabled forKey:kLoggingEnabledKey];
-    [d synchronize];
+    [QCLANPrefs setBool:enabled forKey:kLoggingEnabledKey];
 }
 
 #pragma mark - Internals

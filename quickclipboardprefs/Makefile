@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = QuickClipboardPrefs
 
-QuickClipboardPrefs_FILES = QCRootListController.m QCWebDAVController.m QCLANController.m QCLANLogViewController.m ../QCClipItem.m ../QCClipManager.m ../QCStore.m ../QCWebDAVClient.m ../QCLANServer.m ../QCLANLogger.m
+QuickClipboardPrefs_FILES = QCRootListController.m QCWebDAVController.m QCLANController.m QCLANLogViewController.m ../QCClipItem.m ../QCClipManager.m ../QCStore.m ../QCWebDAVClient.m ../QCLANServer.m ../QCLANLogger.m ../QCLANPrefs.m
 QuickClipboardPrefs_INSTALL_PATH = /Library/PreferenceBundles
 QuickClipboardPrefs_FRAMEWORKS = UIKit
 QuickClipboardPrefs_LIBRARIES = sqlite3 z

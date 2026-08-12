@@ -63,7 +63,7 @@ ssh root@<device-ip> "dpkg -i /tmp/com.mosheng.quickclipboard_*.deb && killall -
 2. **局域网服务**在 SpringBoard 启动时启动，需要设备越狱且插件注入成功。
 3. **WebDAV 加密**使用简单 AES-256-CBC + PKCS7，生产环境建议加入 PBKDF2 派生密钥。
 4. **GitHub 自动构建**的 UI 触发仅保存配置；真正的构建/发布脚本需在 macOS 上执行，或配置 CI runner。
-5. 设置面板中的图标 `icon.png` 需要自行放入 `quickclipboardprefs/Resources/`。
+5. 设置面板中的图标 `icon.png`（开源项目 QuickClipboard 的图标）已内置到 `quickclipboardprefs/Resources/` 与 `layout/Library/PreferenceLoader/Preferences/`。
 
 ## 许可证
 

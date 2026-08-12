@@ -1,6 +1,7 @@
 #import "QCLANController.h"
 #import "QCLANServer.h"
 #import "QCLANLogger.h"
+#import "QCLANPrefs.h"
 #import "QCStore.h"
 #import <objc/runtime.h>
 #import <ifaddrs.h>
@@ -168,9 +169,11 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.pairedDevices = [NSMutableArray array];
     self.discoveredDevices = @[];
 
-    self.sendEnabled    = [self.defaults boolForKey:@"lanSendEnabled"];
-    self.receiveEnabled = [self.defaults objectForKey:@"lanReceiveEnabled"] ? [self.defaults boolForKey:@"lanReceiveEnabled"] : YES;
-    self.notifyEnabled  = [self.defaults boolForKey:@"lanSyncNotifyEnabled"];
+    // 三个开关走共享 plist (QCLANPrefs): 与 SpringBoard 进程(tweak) 互通,
+    // 否则设置页改了后台收不到
+    self.sendEnabled    = [QCLANPrefs boolForKey:@"lanSendEnabled" defaultValue:NO];
+    self.receiveEnabled = [QCLANPrefs boolForKey:@"lanReceiveEnabled" defaultValue:YES];
+    self.notifyEnabled  = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
     self.pairCodeVisible = YES;
     self.httpRunning = YES;
 
@@ -1005,8 +1008,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 - (void)serviceToggled:(UISwitch *)sender {
     // The tweak process always runs the server. This toggle is for intent.
     self.httpRunning = sender.on;
-    [self.defaults setBool:self.httpRunning forKey:@"lanReceiveEnabled"];
-    [self.defaults synchronize];
+    [QCLANPrefs setBool:self.httpRunning forKey:@"lanReceiveEnabled"];
     [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换服务开关 -> %@", sender.on ? @"开" : @"关"];
     [self buildUI];
 }
@@ -1128,23 +1130,20 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 
 - (void)sendToggled:(UISwitch *)sender {
     self.sendEnabled = sender.on;
-    [self.defaults setBool:self.sendEnabled forKey:@"lanSendEnabled"];
-    [self.defaults synchronize];
+    [QCLANPrefs setBool:self.sendEnabled forKey:@"lanSendEnabled"];
     [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换自动推送 -> %@", sender.on ? @"开" : @"关"];
 }
 
 - (void)receiveToggled:(UISwitch *)sender {
     self.receiveEnabled = sender.on;
-    [self.defaults setBool:self.receiveEnabled forKey:@"lanReceiveEnabled"];
-    [self.defaults synchronize];
+    [QCLANPrefs setBool:self.receiveEnabled forKey:@"lanReceiveEnabled"];
     [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换自动拉取 -> %@", sender.on ? @"开" : @"关"];
     [self buildUI];
 }
 
 - (void)notifyToggled:(UISwitch *)sender {
     self.notifyEnabled = sender.on;
-    [self.defaults setBool:self.notifyEnabled forKey:@"lanSyncNotifyEnabled"];
-    [self.defaults synchronize];
+    [QCLANPrefs setBool:self.notifyEnabled forKey:@"lanSyncNotifyEnabled"];
     [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换同步通知 -> %@", sender.on ? @"开" : @"关"];
 }
 

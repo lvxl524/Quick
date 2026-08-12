@@ -50,21 +50,16 @@
         [self.logButton setTitle:@"!" forState:UIControlStateNormal];
         self.logButton.titleLabel.font = [UIFont boldSystemFontOfSize:20];
     }
-    // 无背景色/无外圈, 仅保留图标本身, 内部大小不变
+    // 无背景色/无外圈, 仅保留图标本身
     self.logButton.backgroundColor = [UIColor clearColor];
     self.logButton.tintColor = [UIColor systemBlueColor];
     self.logButton.accessibilityLabel = @"查看局域网日志";
     [self.logButton addTarget:self action:@selector(openLogPanel) forControlEvents:UIControlEventTouchUpInside];
-    self.logButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.logButton];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.logButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-6],
-        [self.logButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
-        [self.logButton.widthAnchor constraintEqualToConstant:38],
-        [self.logButton.heightAnchor constraintEqualToConstant:38],
-    ]];
-    [self.view bringSubviewToFront:self.logButton];
+    // 放到导航栏右侧 (rightBarButtonItem): 与 WebDAV/局域网分段控件同一排, 固定在右上角,
+    // 不随内容滚动、不被内容遮挡
+    self.logButton.frame = CGRectMake(0, 0, 34, 34);
+    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithCustomView:self.logButton];
+    self.navigationItem.rightBarButtonItem = item;
 }
 
 - (void)openLogPanel {
@@ -87,8 +82,6 @@
         self.lanController.view.frame = self.view.bounds;
         self.lanController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     }
-    // 保持日志按钮在最上层
-    [self.view bringSubviewToFront:self.logButton];
 }
 
 @end
