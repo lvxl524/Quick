@@ -64,6 +64,10 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSMutableDictionary<NSString *, QCLANPeer *> *_discoveredPeers;
     BOOL _running;
 
+    // 自动拉取 (定时轮询已配对设备, 实现"电脑复制 → 手机自动接收")
+    dispatch_source_t _autoPullTimer;
+    BOOL _autoPullBusy;
+
     // Bonjour
     NSNetService *_netService;
 }
@@ -253,6 +257,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [self startDiscoveryListener];
         self->_running = YES;
         [self publishBonjour];
+        [self startAutoPullTimer];
         NSLog(@"[QuickClipboard] LAN server started on port %d, device_id: %@, pair code: %@",
               kDefaultLANPort, [self deviceId], self.pairCode);
         [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"局域网服务已启动 (HTTP %d / UDP %d), 本机IP: %@",
@@ -281,6 +286,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             close(self->_discoverySocket);
             self->_discoverySocket = 0;
         }
+        if (self->_autoPullTimer) {
+            dispatch_source_cancel(self->_autoPullTimer);
+            self->_autoPullTimer = nil;
+        }
+        self->_autoPullBusy = NO;
         self->_running = NO;
         NSLog(@"[QuickClipboard] LAN server stopped");
     });
@@ -604,6 +614,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
         // POST /qc-sync/records/history
         } else if ([path isEqualToString:@"/qc-sync/records/history"] && [method isEqualToString:@"POST"]) {
+            [self markPeerSeenFromAddress:address];   // 桌面端在推送 → 记录最近连接时间
             responseData = [self handleReceiveHistory:body statusCode:&statusCode];
 
         // GET /qc-sync/records/favorites?since=ms
@@ -1539,6 +1550,18 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     };
 }
 
+// 设备在线时更新最近连接时间并持久化 (桌面端推送 / 手机端拉取成功时调用)
+- (void)markPeerSeenFromAddress:(NSString *)address {
+    if (!address.length || [address isEqualToString:kLoopbackIP]) return;
+    for (QCLANPeer *p in _peers) {
+        if ([p.address isEqualToString:address]) {
+            p.lastSeen = [NSDate date];
+            [self savePeers];
+            break;
+        }
+    }
+}
+
 
 #pragma mark - Bonjour
 
@@ -1621,14 +1644,66 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
 #pragma mark - Sync Operations (走桌面端 /qc-sync/records/history + Bearer 授权)
 
+// 手机端剪贴板变化 → 自动推送到所有已配对设备 (受"自动推送(发送)"开关控制)
 - (void)broadcastChange {
+    BOOL sendEnabled = [QCLANPrefs boolForKey:@"lanSendEnabled" defaultValue:YES];
+    if (!sendEnabled) {
+        [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"自动推送(发送)已关闭, 跳过推送"];
+        return;
+    }
     NSArray *peers = [_peers copy];
     if (peers.count > 0) {
         [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"剪贴板变化, 自动推送到 %lu 台已配对设备", (unsigned long)peers.count];
     }
     for (QCLANPeer *peer in peers) {
+        if (!peer.peerToken.length || !peer.baseURL.length) continue; // 仅推已配对
         [self pushToPeer:peer completion:nil];
     }
+}
+
+#pragma mark - Auto Pull (定时轮询已配对设备, 实现"电脑复制 → 手机自动接收")
+
+- (void)startAutoPullTimer {
+    if (_autoPullTimer) return;
+    const NSTimeInterval interval = 8.0; // 每 8 秒拉取一次
+    _autoPullTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _queue);
+    dispatch_source_set_timer(_autoPullTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_SEC)),
+                              (uint64_t)(interval * NSEC_PER_SEC),
+                              (uint64_t)(2 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(_autoPullTimer, ^{
+        [self autoPullOnce];
+    });
+    dispatch_resume(_autoPullTimer);
+    [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"自动拉取定时器已启动 (每 %.0f 秒, 受\"自动拉取(接收)\"开关控制)", interval];
+}
+
+- (void)autoPullOnce {
+    if (_autoPullBusy) return;
+    BOOL receiveEnabled = [QCLANPrefs boolForKey:@"lanReceiveEnabled" defaultValue:YES];
+    if (!receiveEnabled) return;
+
+    NSMutableArray *paired = [NSMutableArray array];
+    for (QCLANPeer *p in _peers) {
+        if (p.peerToken.length > 0 && p.baseURL.length > 0) [paired addObject:p];
+    }
+    if (paired.count == 0) return;
+
+    _autoPullBusy = YES;
+    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"自动拉取: %lu 台已配对设备", (unsigned long)paired.count];
+    [self autoPullNext:paired index:0];
+}
+
+- (void)autoPullNext:(NSArray<QCLANPeer *> *)peers index:(NSUInteger)idx {
+    if (idx >= peers.count) {
+        _autoPullBusy = NO;
+        return;
+    }
+    QCLANPeer *peer = peers[idx];
+    // 静默拉取: 不弹窗不通知; pullFromPeerInternal 内部会在有新增时自动写入系统剪贴板
+    [self pullFromPeerInternal:peer completion:^(BOOL ok, NSInteger pulled, NSString *message) {
+        [self autoPullNext:peers index:idx + 1];
+    }];
 }
 
 - (void)pushToPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
@@ -1710,10 +1785,14 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 if (pushedCount > 0) {
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送成功: %@ (%ld 条)",
                      peer.baseURL, (long)pushedCount];
+                    peer.lastSeen = [NSDate date];
+                    [self savePeers];
                     completion(YES, pushedCount, [NSString stringWithFormat:@"已推送 %ld 条记录", (long)pushedCount]);
                 } else {
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送完成: %@ (双方已同步, 0 条)",
                      peer.baseURL];
+                    peer.lastSeen = [NSDate date];
+                    [self savePeers];
                     completion(YES, 0, @"已同步，双方无新内容（0 条）");
                 }
             } else if (error) {
@@ -1795,6 +1874,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             }
         }
         [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取完成: 新增 %lu 条", (unsigned long)count];
+        peer.lastSeen = [NSDate date];   // 拉取成功 = 设备在线, 更新最近连接时间
+        [self savePeers];
         if (completion) completion(YES, (NSInteger)count, [NSString stringWithFormat:@"拉取 %lu 条", (unsigned long)count]);
     }] resume];
 }

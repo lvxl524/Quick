@@ -171,7 +171,8 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 
     // 三个开关走共享 plist (QCLANPrefs): 与 SpringBoard 进程(tweak) 互通,
     // 否则设置页改了后台收不到
-    self.sendEnabled    = [QCLANPrefs boolForKey:@"lanSendEnabled" defaultValue:NO];
+    // v1.3.7: 自动推送默认开启, 实现"手机复制 → 电脑自动接收"开箱即用
+    self.sendEnabled    = [QCLANPrefs boolForKey:@"lanSendEnabled" defaultValue:YES];
     self.receiveEnabled = [QCLANPrefs boolForKey:@"lanReceiveEnabled" defaultValue:YES];
     self.notifyEnabled  = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
     self.pairCodeVisible = YES;
@@ -224,7 +225,11 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
             peer.baseURL   = dict[@"base_url"] ?: @"";
             peer.peerToken = dict[@"peer_token"] ?: @"";
             peer.paired    = [dict[@"paired"] boolValue];
-            peer.lastSeen  = [NSDate dateWithTimeIntervalSince1970:[dict[@"lastSeen"] doubleValue]];
+            // v1.3.7 修复: 服务端 peerJSON 输出的是 last_seen (下划线), 旧版读 lastSeen 永远取不到
+            // → 解析为 1970 → 显示"496253小时前"。兼容两种字段名, 无效时间置 nil。
+            double lastSeenTs = [dict[@"last_seen"] doubleValue];
+            if (lastSeenTs <= 0) lastSeenTs = [dict[@"lastSeen"] doubleValue];
+            peer.lastSeen  = lastSeenTs > 0 ? [NSDate dateWithTimeIntervalSince1970:lastSeenTs] : nil;
             if (peer.paired) [self.pairedDevices addObject:peer];
         }
 
@@ -937,11 +942,17 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     [row addSubview:addrLabel];
 
     UILabel *timeLabel = [[UILabel alloc] init];
+    // v1.3.7: 增加天级单位 + 异常兜底 (lastSeen 缺失/异常时显示"暂无连接记录",
+    // 不再出现 496253小时前 这类从 epoch 0 算出的荒谬数值)
     if (peer.lastSeen) {
         NSTimeInterval ago = -[peer.lastSeen timeIntervalSinceNow];
         if (ago < 60) timeLabel.text = @"刚刚";
         else if (ago < 3600) timeLabel.text = [NSString stringWithFormat:@"%d分钟前", (int)(ago / 60)];
-        else timeLabel.text = [NSString stringWithFormat:@"%d小时前", (int)(ago / 3600)];
+        else if (ago < 86400) timeLabel.text = [NSString stringWithFormat:@"%d小时前", (int)(ago / 3600)];
+        else if (ago < 30 * 86400) timeLabel.text = [NSString stringWithFormat:@"%d天前", (int)(ago / 86400)];
+        else timeLabel.text = @"暂无连接记录";
+    } else {
+        timeLabel.text = @"暂无连接记录";
     }
     timeLabel.font = [UIFont systemFontOfSize:10];
     timeLabel.textColor = [UIColor tertiaryLabelColor];
