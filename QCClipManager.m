@@ -2,6 +2,7 @@
 #import "QCStore.h"
 #import "QCWebDAVClient.h"
 #import "QCLANServer.h"
+#import "QCLANLogger.h"
 
 static const NSTimeInterval kDeduplicateWindow = 2.0;
 
@@ -9,7 +10,9 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
     NSString *_lastCheckSum;
     NSDate *_lastCaptureTime;
     dispatch_queue_t _worker;
-    BOOL _suppressNextCapture;
+    // v1.3.9: 一次性标记改为时间窗口。接收端写回剪贴板会触发多个 hook
+    // (如 setString: 内部级联 setItems:), 窗口期内全部忽略, 避免乒乓循环。
+    NSDate *_suppressUntil;
 }
 @end
 
@@ -37,22 +40,31 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
     dispatch_async(_worker, ^{
         // v1.3.8 修复: 接收端把内容写回剪贴板后, 会同步触发本 hook;
         // 如果继续走自动同步, 会立刻把同一条内容再推回电脑, 造成乒乓循环。
-        // 因此在写入前设置抑制标记, 此处消费并直接丢弃。
-        if (self->_suppressNextCapture) {
-            self->_suppressNextCapture = NO;
+        // v1.3.9: 改为时间窗口抑制 —— 一次接收写入可能级联触发多个
+        // hook 方法(setString: 内部可能再调 setItems:), 窗口期内全部忽略,
+        // 窗口自动过期, 不消耗状态。
+        NSDate *now = [NSDate date];
+        if (self->_suppressUntil && [now compare:self->_suppressUntil] == NSOrderedAscending) {
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"捕获被抑制(接收回写窗口内), 跳过"];
             return;
         }
 
         QCClipItem *item = [self buildItemFromPasteboard:pasteboard];
-        if (!item) return;
+        if (!item) {
+            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"捕获剪贴板变化, 但无法解析内容"];
+            return;
+        }
 
         NSString *checkSum = item.checkSum ?: [item computeCheckSum];
         item.checkSum = checkSum;
 
         // Dedup within window: 同一内容 2 秒内只处理一次, 但 2 秒后重新复制仍可触发同步
         if ([checkSum isEqualToString:self->_lastCheckSum]) {
-            NSDate *now = [NSDate date];
-            if ([now timeIntervalSinceDate:self->_lastCaptureTime] < kDeduplicateWindow) return;
+            NSDate *now2 = [NSDate date];
+            if ([now2 timeIntervalSinceDate:self->_lastCaptureTime] < kDeduplicateWindow) {
+                [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"剪贴板变化与上次相同(2秒去重窗口内), 跳过"];
+                return;
+            }
         }
 
         QCClipItem *existing = [[QCStore sharedStore] itemWithCheckSum:checkSum];
@@ -64,6 +76,7 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
             self->_lastCaptureTime = [NSDate date];
             // v1.3.8 修复: 用户复制了一条已存在于历史库里的内容(例如刚收到的电脑内容,
             // 或之前复制过的内容)时, 仍应触发自动同步, 否则电脑端收不到。
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"剪贴板变化(内容已存在), 触发自动同步"];
             [self triggerAutoSync];
             return;
         }
@@ -73,6 +86,8 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
             self->_lastCheckSum = checkSum;
             self->_lastCaptureTime = [NSDate date];
             [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:item];
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"捕获剪贴板新内容, 触发自动同步 (%@)",
+             item.textRepresentation.length > 20 ? [item.textRepresentation substringToIndex:20] : item.textRepresentation];
             [self triggerAutoSync];
         }
     });
@@ -121,11 +136,12 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 }
 
 - (void)writeItemToPasteboard:(QCClipItem *)item suppressBroadcast:(BOOL)suppress {
-    // 设置抑制标记与写入剪贴板必须在同一条串行 worker 队列里,
-    // 确保 hook 触发的 capturePasteboard 在标记仍有效时看到它。
+    // 设置抑制窗口与写入剪贴板必须在同一条串行 worker 队列里,
+    // 确保 hook 触发的 capturePasteboard 在窗口仍有效时看到它。
+    // v1.3.9: 窗口 0.8 秒, 覆盖 setString: → setItems: 等级联触发的多个 hook。
     dispatch_sync(_worker, ^{
         if (suppress) {
-            self->_suppressNextCapture = YES;
+            self->_suppressUntil = [NSDate dateWithTimeIntervalSinceNow:0.8];
         }
         UIPasteboard *pb = [UIPasteboard generalPasteboard];
         switch (item.type) {

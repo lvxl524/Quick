@@ -262,6 +262,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
               kDefaultLANPort, [self deviceId], self.pairCode);
         [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"局域网服务已启动 (HTTP %d / UDP %d), 本机IP: %@",
          kDefaultLANPort, kDiscoveryPort, [self primaryLocalIP] ?: @"?"];
+        // v1.3.9: 端口绑定失败时明确提示: tweak 注入多个进程, 只有一个能占用端口,
+        // 属正常现象; 自动同步发送(复制触发推送)不依赖本进程端口, 不受影响。
+        if (_listenSocket == 0 || _discoverySocket == 0) {
+            [[QCLANLogger sharedLogger] warn:@"SYS" fmt:@"端口 %d/%d 已被其他进程占用(多进程注入属正常), 自动同步发送不受影响",
+             kDefaultLANPort, kDiscoveryPort];
+        }
     });
 }
 
@@ -1695,6 +1701,10 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     BOOL receiveEnabled = [QCLANPrefs boolForKey:@"lanReceiveEnabled" defaultValue:YES];
     if (!receiveEnabled) return;
 
+    // v1.3.9: 与 broadcastChange 对称, 轮询前从磁盘重载最新配对信息,
+    // 避免多进程 _peers 过期 (如设置页重新配对后, 本进程内存仍是旧配对)。
+    [self loadPeers];
+
     NSMutableArray *paired = [NSMutableArray array];
     for (QCLANPeer *p in _peers) {
         if (p.peerToken.length > 0 && p.baseURL.length > 0) [paired addObject:p];
@@ -1712,7 +1722,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         return;
     }
     QCLANPeer *peer = peers[idx];
-    // 静默拉取: 不弹窗不通知; pullFromPeerInternal 内部会在有新增时自动写入系统剪贴板
+    // 静默轮询: 不打断用户; 有新增时 pullFromPeerInternal 内部会写入系统剪贴板,
+    // 并按"同步通知"开关弹提示 (v1.3.9)。
     [self pullFromPeerInternal:peer completion:^(BOOL ok, NSInteger pulled, NSString *message) {
         [self autoPullNext:peers index:idx + 1];
     }];
@@ -1876,6 +1887,17 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             }
             if (count > 0) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
+                // v1.3.9 修复: 轮询拉取到新增内容时, 按"同步通知"开关弹通知提示,
+                // 与 handleReceiveHistory 行为一致 (旧版拉取通道从不发通知, 用户无感知)。
+                BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
+                if (notifyEnabled) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [[NSNotificationCenter defaultCenter] postNotificationName:QCLANSyncReceivedNotification
+                                                                            object:nil
+                                                                          userInfo:@{@"count": @(count)}];
+                    });
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已发送接收通知 (%ld 条)", (long)count];
+                }
                 // 关键修复: 拉取到的新增记录写入系统剪贴板, 用户可直接粘贴
                 // v1.3.8: suppressBroadcast=YES 避免把刚拉取的内容反向推回电脑
                 if (newestNewItem) {
