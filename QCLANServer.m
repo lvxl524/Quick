@@ -1674,9 +1674,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         NSInteger code = [(NSHTTPURLResponse *)response statusCode];
         BOOL ok = code == 200;
         NSString *detail = nil;
+        NSDictionary *respJson = nil;
         if (data.length > 0) {
-            NSDictionary *respJson = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if ([respJson isKindOfClass:[NSDictionary class]]) {
+            id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([parsed isKindOfClass:[NSDictionary class]]) {
+                respJson = parsed;
                 detail = respJson[@"message"];
             }
         }
