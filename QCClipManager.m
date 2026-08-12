@@ -10,7 +10,8 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 @interface QCClipManager () {
     NSString *_lastCheckSum;
     NSDate *_lastCaptureTime;
-    dispatch_queue_t _worker;
+    // v1.3.11: 所有 UIPasteboard 访问与状态字段读写统一在主线程,
+    // 不再使用后台 worker 队列 (后台访问 UIPasteboard 是安全模式崩溃根源)。
     // v1.3.9: 一次性标记改为时间窗口。接收端写回剪贴板会触发多个 hook
     // (如 setString: 内部级联 setItems:), 窗口期内全部忽略, 避免乒乓循环。
     NSDate *_suppressUntil;
@@ -35,14 +36,18 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _worker = dispatch_queue_create("com.mosheng.quickclipboard.manager", DISPATCH_QUEUE_SERIAL);
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleLANSyncReceived:) name:QCLANSyncReceivedNotification object:nil];
     }
     return self;
 }
 
 - (void)capturePasteboard:(UIPasteboard *)pasteboard {
-    dispatch_async(_worker, ^{
+    // v1.3.11 修复: UIPasteboard 是 UIKit 类, 非线程安全, 必须只在主线程访问。
+    // 旧版在 _worker 后台线程读取 UIPasteboard —— v1.3.10 起 SpringBoard 进程
+    // 每 2 秒轮询一次, 后台线程访问 UIPasteboard 在 iOS 15+ 极易崩溃
+    // (与 pasteboardd 的 XPC 竞争/安全违例), 导致 SpringBoard 崩溃进入安全模式。
+    // 现在读取、构建、存储、推送全部在主线程串行执行, 状态字段无竞争。
+    dispatch_async(dispatch_get_main_queue(), ^{
         // v1.3.8 修复: 接收端把内容写回剪贴板后, 会同步触发本 hook;
         // 如果继续走自动同步, 会立刻把同一条内容再推回电脑, 造成乒乓循环。
         // v1.3.9: 改为时间窗口抑制 —— 一次接收写入可能级联触发多个
@@ -141,10 +146,10 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 }
 
 - (void)writeItemToPasteboard:(QCClipItem *)item suppressBroadcast:(BOOL)suppress {
-    // 设置抑制窗口与写入剪贴板必须在同一条串行 worker 队列里,
-    // 确保 hook 触发的 capturePasteboard 在窗口仍有效时看到它。
-    // v1.3.9: 窗口 0.8 秒, 覆盖 setString: → setItems: 等级联触发的多个 hook。
-    dispatch_sync(_worker, ^{
+    // v1.3.11 修复: UIPasteboard 写入强制主线程 (UIKit 非线程安全)。
+    // 主线程与 hook 触发的 capturePasteboard 串行执行, 抑制窗口语义保持不变
+    // (写回后 hook 在窗口期内看到 → 跳过 → 不会反向推回电脑)。
+    dispatch_async(dispatch_get_main_queue(), ^{
         if (suppress) {
             self->_suppressUntil = [NSDate dateWithTimeIntervalSinceNow:0.8];
         }
@@ -176,71 +181,70 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 // 仍会变化, 轮询能发现并触发完整捕获链路 (保存 + 自动推送)。
 // 与 hook 共用同一去重/抑制窗口, 不会重复推送; 仅在 SpringBoard 进程调用。
 - (void)startPasteboardPolling {
-    dispatch_async(_worker, ^{
+    // v1.3.11 修复: 读取 changeCount 与创建 timer 统一在主线程
+    // (UIPasteboard 非线程安全, 旧版在 _worker 后台读取)。
+    dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_pollTimer) return;
         self->_lastChangeCount = [[UIPasteboard generalPasteboard] changeCount];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self->_pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
-                                                                 target:self
-                                                               selector:@selector(pollPasteboardChange)
-                                                               userInfo:nil
-                                                                repeats:YES];
-        });
+        self->_pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                             target:self
+                                                           selector:@selector(pollPasteboardChange)
+                                                           userInfo:nil
+                                                            repeats:YES];
     });
 }
 
 - (void)pollPasteboardChange {
-    // 所有状态读写都在 _worker 串行队列, 无竞争
-    dispatch_async(_worker, ^{
-        UIPasteboard *pb = [UIPasteboard generalPasteboard];
-        NSInteger cc = pb.changeCount;
-        if (cc == self->_lastChangeCount) return;  // 无变化, 静默
-        self->_lastChangeCount = cc;
+    // v1.3.11 修复: timer 回调本身在主线程, 直接执行 (UIPasteboard 非线程安全,
+    // 旧版 dispatch_async(_worker) 在后台线程访问, 每 2 秒一次高频触发易崩溃)。
+    UIPasteboard *pb = [UIPasteboard generalPasteboard];
+    NSInteger cc = pb.changeCount;
+    if (cc == self->_lastChangeCount) return;  // 无变化, 静默
+    self->_lastChangeCount = cc;
 
-        // 抑制窗口: 接收端写回剪贴板触发的变化直接跳过 (防乒乓双保险)
-        NSDate *now = [NSDate date];
-        if (self->_suppressUntil && [now compare:self->_suppressUntil] == NSOrderedAscending) {
-            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询发现变化但处于接收回写抑制窗口, 跳过"];
-            return;
-        }
+    // 抑制窗口: 接收端写回剪贴板触发的变化直接跳过 (防乒乓双保险)
+    NSDate *now = [NSDate date];
+    if (self->_suppressUntil && [now compare:self->_suppressUntil] == NSOrderedAscending) {
+        [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询发现变化但处于接收回写抑制窗口, 跳过"];
+        return;
+    }
 
-        QCClipItem *item = [self buildItemFromPasteboard:pb];
-        if (!item) {
-            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"轮询: 剪贴板变化但无法解析内容"];
-            return;
-        }
+    QCClipItem *item = [self buildItemFromPasteboard:pb];
+    if (!item) {
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"轮询: 剪贴板变化但无法解析内容"];
+        return;
+    }
 
-        NSString *checkSum = item.checkSum ?: [item computeCheckSum];
-        item.checkSum = checkSum;
+    NSString *checkSum = item.checkSum ?: [item computeCheckSum];
+    item.checkSum = checkSum;
 
-        // 与 hook 共用同一去重窗口
-        if ([checkSum isEqualToString:self->_lastCheckSum]) {
-            NSDate *now2 = [NSDate date];
-            if ([now2 timeIntervalSinceDate:self->_lastCaptureTime] < kDeduplicateWindow) return;
-        }
+    // 与 hook 共用同一去重窗口
+    if ([checkSum isEqualToString:self->_lastCheckSum]) {
+        NSDate *now2 = [NSDate date];
+        if ([now2 timeIntervalSinceDate:self->_lastCaptureTime] < kDeduplicateWindow) return;
+    }
 
-        QCClipItem *existing = [[QCStore sharedStore] itemWithCheckSum:checkSum];
-        if (existing) {
-            existing.updatedAt = [NSDate date];
-            existing.deviceID = [self deviceID];
-            [[QCStore sharedStore] updateItem:existing];
-            self->_lastCheckSum = checkSum;
-            self->_lastCaptureTime = [NSDate date];
-            // 内容已存在 = 其他进程的 hook 已捕获并推送过, 不再重复推送
-            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询: 内容已存在(其他进程已处理), 跳过推送"];
-            return;
-        }
+    QCClipItem *existing = [[QCStore sharedStore] itemWithCheckSum:checkSum];
+    if (existing) {
+        existing.updatedAt = [NSDate date];
+        existing.deviceID = [self deviceID];
+        [[QCStore sharedStore] updateItem:existing];
+        self->_lastCheckSum = checkSum;
+        self->_lastCaptureTime = [NSDate date];
+        // 内容已存在 = 其他进程的 hook 已捕获并推送过, 不再重复推送
+        [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询: 内容已存在(其他进程已处理), 跳过推送"];
+        return;
+    }
 
-        item.deviceID = [self deviceID];
-        if ([[QCStore sharedStore] saveItem:item]) {
-            self->_lastCheckSum = checkSum;
-            self->_lastCaptureTime = [NSDate date];
-            [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:item];
-            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询捕获剪贴板新内容, 触发自动同步 (%@)",
-             item.textRepresentation.length > 20 ? [item.textRepresentation substringToIndex:20] : item.textRepresentation];
-            [self triggerAutoSync];
-        }
-    });
+    item.deviceID = [self deviceID];
+    if ([[QCStore sharedStore] saveItem:item]) {
+        self->_lastCheckSum = checkSum;
+        self->_lastCaptureTime = [NSDate date];
+        [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:item];
+        [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询捕获剪贴板新内容, 触发自动同步 (%@)",
+         item.textRepresentation.length > 20 ? [item.textRepresentation substringToIndex:20] : item.textRepresentation];
+        [self triggerAutoSync];
+    }
 }
 
 - (void)triggerAutoSync {
@@ -267,9 +271,10 @@ static id QCUNCenter(void) {
         return;
     }
     // Theos SDK 下 UserNotifications 头文件方法查找异常, 全部 runtime 调用 (与 Tweak.xm 一致)。
-    typedef void (*MsgSend1)(id, SEL, id);
-    MsgSend1 msgSend1 = (MsgSend1)objc_msgSend;
-    msgSend1(center, NSSelectorFromString(@"getNotificationSettingsWithCompletionHandler:"), ^(id settings) {
+    // v1.3.11 修复: 经 objc_msgSend 函数指针传 block 时编译器不会自动 copy 到堆,
+    // 而系统 API 会在异步回调中保存并调用该 block —— 必须显式 copy, 否则栈 block
+    // 悬垂 → 回调时 EXC_BAD_ACCESS 崩溃。
+    void (^settingsHandler)(id) = [^(id settings) {
         // UNAuthorizationStatus: NotDetermined=0 Denied=1 Authorized=2 Provisional=3
         NSInteger status = -1;
         SEL statusSel = NSSelectorFromString(@"authorizationStatus");
@@ -282,22 +287,26 @@ static id QCUNCenter(void) {
             // 首次请求通知权限 (系统弹窗, 用户允许后显示横幅)
             typedef void (*MsgSend2)(id, SEL, NSUInteger, id);
             MsgSend2 msgSend2 = (MsgSend2)objc_msgSend;
-            msgSend2(center, NSSelectorFromString(@"requestAuthorizationWithOptions:completionHandler:"),
-                     (1 | 2 | 4),  // Alert|Sound|Badge
-                     ^(BOOL granted, NSError *error) {
+            void (^authHandler)(BOOL, NSError *) = [^(BOOL granted, NSError *error) {
                 if (granted) {
                     [self postReceivedLocalNotificationWithCount:count];
                 } else {
                     [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限被拒绝, 无法弹横幅提示 (%@)",
                      error ? error.localizedDescription : @"用户拒绝"];
                 }
-            });
+            } copy];
+            msgSend2(center, NSSelectorFromString(@"requestAuthorizationWithOptions:completionHandler:"),
+                     (1 | 2 | 4),  // Alert|Sound|Badge
+                     authHandler);
         } else if (status == 2 || status == 3) {
             [self postReceivedLocalNotificationWithCount:count];
         } else {
             [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限未开启, 无法弹横幅提示 (状态 %ld)", (long)status];
         }
-    });
+    } copy];
+    typedef void (*MsgSend1)(id, SEL, id);
+    MsgSend1 msgSend1 = (MsgSend1)objc_msgSend;
+    msgSend1(center, NSSelectorFromString(@"getNotificationSettingsWithCompletionHandler:"), settingsHandler);
 }
 
 - (void)postReceivedLocalNotificationWithCount:(NSInteger)count {
@@ -323,16 +332,18 @@ static id QCUNCenter(void) {
     if (!request) return;
 
     // addNotificationRequest:withCompletionHandler: 同样 runtime 调用
+    // v1.3.11: block 显式 copy (同 handleLANSyncReceived: 的悬垂修复)
     typedef void (*MsgSend2b)(id, SEL, id, id);
     MsgSend2b msgSend2b = (MsgSend2b)objc_msgSend;
-    msgSend2b(center, NSSelectorFromString(@"addNotificationRequest:withCompletionHandler:"), request,
-              ^(NSError *error) {
+    void (^addHandler)(NSError *) = [^(NSError *error) {
         if (error) {
             [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"发送系统通知失败: %@", error.localizedDescription];
         } else {
             [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已弹系统横幅通知 (%ld 条)", (long)count];
         }
-    });
+    } copy];
+    msgSend2b(center, NSSelectorFromString(@"addNotificationRequest:withCompletionHandler:"), request,
+              addHandler);
 }
 
 - (NSString *)deviceID {

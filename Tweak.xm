@@ -154,23 +154,26 @@ static id QCUNCenter(void) {
         [[QCLANServer sharedServer] start];
         // Ensure QCClipManager is initialized so notification observers are registered
         [QCClipManager sharedManager];
-        // v1.3.10: SpringBoard 进程设置通知 delegate, 保证前台也弹横幅
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
-        if ([bundleID isEqualToString:@"com.apple.springboard"]) {
-            id center = QCUNCenter();
-            if (center) {
-                QCNotifDelegate = [[QCNotificationDelegate alloc] init];
-                // setDelegate: 用 performSelector 规避 Theos SDK 头文件误解析
-                [center performSelector:@selector(setDelegate:) withObject:QCNotifDelegate];
-                NSLog(@"[QuickClipboard] UNUserNotificationCenter delegate 已设置 (SpringBoard)");
+        // v1.3.11 修复: %ctor 可能在任意线程执行 (dyld 加载线程), 而
+        // UNUserNotificationCenter / UIPasteboard 相关初始化涉及 UIKit 类,
+        // 必须在主线程 —— 旧版直接在 %ctor 调用导致 SpringBoard 偶发崩溃进安全模式。
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+            if ([bundleID isEqualToString:@"com.apple.springboard"]) {
+                // v1.3.10: SpringBoard 进程设置通知 delegate, 保证前台也弹横幅
+                id center = QCUNCenter();
+                if (center) {
+                    QCNotifDelegate = [[QCNotificationDelegate alloc] init];
+                    // setDelegate: 用 performSelector 规避 Theos SDK 头文件误解析
+                    [center performSelector:@selector(setDelegate:) withObject:QCNotifDelegate];
+                    NSLog(@"[QuickClipboard] UNUserNotificationCenter delegate 已设置 (SpringBoard)");
+                }
+                // v1.3.10: 剪贴板轮询兜底 —— 只在 SpringBoard 进程启动,
+                // 不依赖 hook 也能发现剪贴板变化 (微信等 App 的复制 hook 抓不到时兜底)。
+                [[QCClipManager sharedManager] startPasteboardPolling];
+                NSLog(@"[QuickClipboard] 剪贴板轮询兜底已启动 (SpringBoard)");
             }
-        }
-        // v1.3.10: 剪贴板轮询兜底 —— 只在 SpringBoard 进程启动,
-        // 不依赖 hook 也能发现剪贴板变化 (微信等 App 的复制 hook 抓不到时兜底)。
-        if ([bundleID isEqualToString:@"com.apple.springboard"]) {
-            [[QCClipManager sharedManager] startPasteboardPolling];
-            NSLog(@"[QuickClipboard] 剪贴板轮询兜底已启动 (SpringBoard)");
-        }
+        });
     }
 }
 
