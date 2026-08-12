@@ -1632,10 +1632,17 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 }
 
 - (void)pushToPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
+    [self pushToPeerInternal:peer completion:^(BOOL ok, NSInteger pushed, NSString *message) {
+        if (completion) completion(ok, message);
+    }];
+}
+
+// 内部实现: 把本机全部记录推送到对方, 回调携带"对方实际接收的条数"
+- (void)pushToPeerInternal:(QCLANPeer *)peer completion:(void (^)(BOOL ok, NSInteger pushed, NSString *message))completion {
     if (!peer.peerToken.length || !peer.baseURL.length) {
         NSLog(@"[QuickClipboard] Push skipped: peer %@ not paired", peer.deviceId);
         [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"推送跳过: %@ 未配对", peer.deviceId];
-        if (completion) completion(NO, @"设备未配对");
+        if (completion) completion(NO, 0, @"设备未配对");
         return;
     }
 
@@ -1647,7 +1654,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     if (records.count == 0) {
         // 本机没有记录时明确提示, 避免"点了没反应"的困惑
         [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"推送跳过: 本机剪贴板暂无记录 (%@)", peer.baseURL];
-        if (completion) completion(NO, @"本机剪贴板暂无记录可推送");
+        if (completion) completion(NO, 0, @"本机剪贴板暂无记录可推送");
         return;
     }
     NSDictionary *batch = @{@"collection": @"history", @"records": records};
@@ -1693,37 +1700,46 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         }
         if (completion) {
             if (ok) {
-                // 桌面端增量同步: 响应体带 pushed 数量, 0 表示对方已是最新 (并非没反应)
+                // 桌面端响应是 LanRecordBatch: {"collection":"history","records":[changed...]}
+                // v1.3.6 修复: 桌面端响应里没有 pushed 字段, 条数必须从 records 数组取
                 NSInteger pushedCount = 0;
                 if ([respJson isKindOfClass:[NSDictionary class]]) {
-                    pushedCount = [respJson[@"pushed"] integerValue];
+                    NSArray *respRecords = respJson[@"records"];
+                    if ([respRecords isKindOfClass:[NSArray class]]) pushedCount = respRecords.count;
                 }
                 if (pushedCount > 0) {
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送成功: %@ (%ld 条)",
                      peer.baseURL, (long)pushedCount];
-                    completion(YES, [NSString stringWithFormat:@"已推送 %ld 条记录", (long)pushedCount]);
+                    completion(YES, pushedCount, [NSString stringWithFormat:@"已推送 %ld 条记录", (long)pushedCount]);
                 } else {
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送完成: %@ (双方已同步, 0 条)",
                      peer.baseURL];
-                    completion(YES, @"已同步，双方无新内容（0 条）");
+                    completion(YES, 0, @"已同步，双方无新内容（0 条）");
                 }
             } else if (error) {
-                completion(NO, error.localizedDescription ?: @"推送失败");
+                completion(NO, 0, error.localizedDescription ?: @"推送失败");
             } else if (detail.length > 0) {
                 // 桌面端 403 等会返回具体原因 (如: 局域网接收已关闭), 直接透传给用户
-                completion(NO, [NSString stringWithFormat:@"对方拒绝: %@", detail]);
+                completion(NO, 0, [NSString stringWithFormat:@"对方拒绝: %@", detail]);
             } else {
-                completion(NO, [NSString stringWithFormat:@"推送失败 (HTTP %ld)", (long)code]);
+                completion(NO, 0, [NSString stringWithFormat:@"推送失败 (HTTP %ld)", (long)code]);
             }
         }
     }] resume];
 }
 
 - (void)pullFromPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
+    [self pullFromPeerInternal:peer completion:^(BOOL ok, NSInteger pulled, NSString *message) {
+        if (completion) completion(ok, message);
+    }];
+}
+
+// 内部实现: 从对方拉取全部历史, 回调携带"新增条数"; 最新新增记录写入系统剪贴板
+- (void)pullFromPeerInternal:(QCLANPeer *)peer completion:(void (^)(BOOL ok, NSInteger pulled, NSString *message))completion {
     if (!peer.peerToken.length || !peer.baseURL.length) {
         NSLog(@"[QuickClipboard] Pull skipped: peer %@ not paired", peer.deviceId);
         [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"拉取跳过: %@ 未配对", peer.deviceId];
-        if (completion) completion(NO, @"设备未配对");
+        if (completion) completion(NO, 0, @"设备未配对");
         return;
     }
 
@@ -1746,13 +1762,13 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             NSLog(@"[QuickClipboard] Pull from %@ failed: %@", peer.deviceId, error.localizedDescription);
             [[QCLANLogger sharedLogger] error:@"SYNC" fmt:@"从 %@ 拉取失败: %@",
              peer.baseURL, error.localizedDescription ?: @"无数据"];
-            if (completion) completion(NO, error.localizedDescription ?: @"拉取失败");
+            if (completion) completion(NO, 0, error.localizedDescription ?: @"拉取失败");
             return;
         }
         NSDictionary *batch = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSArray *records = [batch isKindOfClass:[NSDictionary class]] ? batch[@"records"] : nil;
         NSUInteger count = 0;
-        QCClipItem *latestItem = nil;
+        QCClipItem *newestNewItem = nil;   // 本次拉取到的最新"新增"记录 (按更新时间)
         if ([records isKindOfClass:[NSArray class]]) {
             NSMutableArray *received = [NSMutableArray array];
             for (NSDictionary *dict in records) {
@@ -1762,23 +1778,67 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 if (!existing) {
                     [[QCStore sharedStore] saveItem:item];
                     count++;
-                    latestItem = item;
+                    if (!newestNewItem || [item.updatedAt compare:newestNewItem.updatedAt] == NSOrderedDescending) {
+                        newestNewItem = item;
+                    }
                 }
             }
             if (count > 0) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
-                // 关键修复: 拉取到的记录写入系统剪贴板, 用户可直接粘贴
-                if (latestItem) {
-                    [[QCClipManager sharedManager] writeItemToPasteboard:latestItem];
-                    NSString *preview = latestItem.textRepresentation;
+                // 关键修复: 拉取到的新增记录写入系统剪贴板, 用户可直接粘贴
+                if (newestNewItem) {
+                    [[QCClipManager sharedManager] writeItemToPasteboard:newestNewItem];
+                    NSString *preview = newestNewItem.textRepresentation;
                     if (preview.length > 40) preview = [preview substringToIndex:40];
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把拉取内容写入剪贴板: %@", preview];
                 }
             }
         }
         [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取完成: 新增 %lu 条", (unsigned long)count];
-        if (completion) completion(YES, [NSString stringWithFormat:@"拉取 %lu 条", (unsigned long)count]);
+        if (completion) completion(YES, (NSInteger)count, [NSString stringWithFormat:@"拉取 %lu 条", (unsigned long)count]);
     }] resume];
+}
+
+#pragma mark - 双向同步 (手机端"同步"按钮: 先推后拉, 把电脑端最新内容带回手机剪贴板)
+
+- (void)syncNowWithPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
+    if (!peer.peerToken.length || !peer.baseURL.length) {
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"同步跳过: %@ 未配对", peer.deviceId];
+        if (completion) completion(NO, @"设备未配对");
+        return;
+    }
+    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"开始双向同步: %@ (%@)", peer.name ?: peer.deviceId, peer.baseURL];
+
+    __block NSInteger pushedCount = 0;
+    [self pushToPeerInternal:peer completion:^(BOOL ok, NSInteger pushed, NSString *message) {
+        if (!ok) {
+            // 本机无记录时跳过推送阶段, 仍然继续拉取 (电脑端可能有内容需要带回手机)
+            BOOL emptyLocal = [message containsString:@"暂无记录"];
+            if (!emptyLocal) {
+                if (completion) completion(NO, message ?: @"推送失败");
+                return;
+            }
+            pushedCount = 0;
+        } else {
+            pushedCount = pushed;
+        }
+        [self pullFromPeerInternal:peer completion:^(BOOL ok2, NSInteger pulled, NSString *message2) {
+            if (!ok2) {
+                if (completion) completion(NO, message2 ?: @"拉取失败");
+                return;
+            }
+            NSString *summary;
+            if (pushedCount + pulled > 0) {
+                summary = [NSString stringWithFormat:@"已推送 %ld 条，已接收 %ld 条，最新内容已写入手机剪贴板",
+                           (long)pushedCount, (long)pulled];
+            } else {
+                summary = @"已同步，双方无新内容（0 条）";
+            }
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"双向同步完成: %@ (推送 %ld, 拉取 %ld)",
+             peer.baseURL, (long)pushedCount, (long)pulled];
+            if (completion) completion(YES, summary);
+        }];
+    }];
 }
 
 

@@ -62,6 +62,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)broadcastChange;
 - (void)pushToPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
 - (void)pullFromPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
+- (void)syncNowWithPeer:(QCLANPeer *)peer completion:(nullable void (^)(BOOL success, NSString *message))completion;
 
 @end
 

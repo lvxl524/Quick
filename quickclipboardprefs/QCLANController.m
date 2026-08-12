@@ -949,7 +949,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     [row addSubview:timeLabel];
 
     UIButton *pushBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [pushBtn setTitle:@"推送" forState:UIControlStateNormal];
+    [pushBtn setTitle:@"同步" forState:UIControlStateNormal];
     pushBtn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
     pushBtn.backgroundColor = [UIColor systemBlueColor];
     [pushBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -1096,14 +1096,15 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     NSString *deviceId = sender.deviceId;
     QCLANPeer *peer = [self findPeerByDeviceId:deviceId];
     if (!peer) {
-        [[QCLANLogger sharedLogger] warn:@"UI" fmt:@"推送: 未找到设备 %@", deviceId];
+        [[QCLANLogger sharedLogger] warn:@"UI" fmt:@"同步: 未找到设备 %@", deviceId];
         return;
     }
 
-    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击推送: %@ (%@)", peer.name, peer.baseURL];
-    [[QCLANServer sharedServer] pushToPeer:peer completion:^(BOOL success, NSString *message) {
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击同步: %@ (%@)", peer.name, peer.baseURL];
+    // v1.3.6: 由单向推送改为双向同步 —— 先推后拉, 拉取到的最新内容自动写入手机剪贴板
+    [[QCLANServer sharedServer] syncNowWithPeer:peer completion:^(BOOL success, NSString *message) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self showAlert:success ? @"推送完成" : @"推送失败" message:message];
+            [self showAlert:success ? @"同步完成" : @"同步失败" message:message];
         });
     }];
 }
