@@ -122,6 +122,12 @@ static NSString * const kDBPath = @"/var/mobile/Library/QuickClipboard/clipboard
     return items.firstObject;
 }
 
+// v1.3.16: 本地库最新一条记录的更新时间 (写回剪贴板门槛的相对新旧判断)
+- (nullable NSDate *)latestItemUpdatedAt {
+    NSArray *items = [self runQuery:@"SELECT * FROM clips WHERE deleted = 0 ORDER BY updatedAt DESC LIMIT 1" args:nil];
+    return items.firstObject ? ((QCClipItem *)items.firstObject).updatedAt : nil;
+}
+
 - (NSArray<QCClipItem *> *)runQuery:(NSString *)sql args:(nullable NSArray *)args {
     __block NSMutableArray *results = [NSMutableArray array];
     dispatch_sync(_queue, ^{

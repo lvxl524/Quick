@@ -912,6 +912,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSArray *records = [batch isKindOfClass:[NSDictionary class]] ? batch[@"records"] : nil;
     NSMutableArray *changed = [NSMutableArray array];
     QCClipItem *latestItem = nil;   // 本次批次中"变更记录"里 updatedAt 最新的一条
+    // v1.3.16: 记录本次处理前本地库最新时间, 供写回门槛做相对新旧判断
+    NSDate *localLatestBefore = [[QCStore sharedStore] latestItemUpdatedAt];
     if ([records isKindOfClass:[NSArray class]]) {
         for (NSDictionary *dict in records) {
             if (![dict isKindOfClass:[NSDictionary class]]) continue;
@@ -925,7 +927,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                     [[QCStore sharedStore] saveItem:item];
                     [changed addObject:[self cloudRecordFromItem:item]];
                     // v1.3.15: 按 updatedAt 取最新 (与拉取通道对称), 不再依赖推送数组顺序
-                    if (!latestItem || [item.updatedAt compare:latestItem.updatedAt] == NSOrderedDescending) {
+                    // v1.3.16: 过滤不合理时间戳(1970/未来), 防远端脏数据抢占候选
+                    if ([self isValidUpdateTime:item.updatedAt] &&
+                        (!latestItem || [item.updatedAt compare:latestItem.updatedAt] == NSOrderedDescending)) {
                         latestItem = item;
                     }
                 }
@@ -933,7 +937,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 [[QCStore sharedStore] saveItem:item];
                 [changed addObject:[self cloudRecordFromItem:item]];
                 // v1.3.15: 按 updatedAt 取最新 (与拉取通道对称), 不再依赖推送数组顺序
-                if (!latestItem || [item.updatedAt compare:latestItem.updatedAt] == NSOrderedDescending) {
+                // v1.3.16: 过滤不合理时间戳(1970/未来), 防远端脏数据抢占候选
+                if ([self isValidUpdateTime:item.updatedAt] &&
+                    (!latestItem || [item.updatedAt compare:latestItem.updatedAt] == NSOrderedDescending)) {
                     latestItem = item;
                 }
             }
@@ -950,16 +956,21 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             }
             // 关键修复: 收到的记录写入系统剪贴板, 用户可直接粘贴 (电脑端复制 → 手机端剪贴板)
             // v1.3.8: suppressBroadcast=YES 防止写入剪贴板同步触发 hook, 避免把刚收到的内容立刻推回电脑
-            // v1.3.15: 新鲜度门槛 —— 仅当最新一条确实是"刚复制"的内容(updatedAt 距今 <= 60 秒)
-            //         才写回系统剪贴板; 首次配对/全量同步推来的历史记录不写回, 避免顶掉用户当前剪贴板。
-            if (latestItem && [self shouldWriteBackToPasteboard:latestItem]) {
+            // v1.3.16: 门槛 = 实时(<=60s) 或 小批量增量且比本地最新更新, 全量历史不写回
+            if (latestItem && [self shouldWriteBackToPasteboard:latestItem
+                                                      batchCount:records.count
+                                                       newerThan:localLatestBefore]) {
                 [[QCClipManager sharedManager] writeItemToPasteboard:latestItem suppressBroadcast:YES];
                 NSString *preview = latestItem.textRepresentation;
                 if (preview.length > 40) preview = [preview substringToIndex:40];
                 [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把收到的内容写入剪贴板: %@", preview];
             } else if (latestItem) {
-                [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"最新收到条目不是实时内容 (updatedAt 距今 %.0f 秒), 跳过写回剪贴板",
-                 -[latestItem.updatedAt timeIntervalSinceNow]];
+                [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"最新收到条目不是实时内容 (updatedAt 距今 %.0f 秒, 批次 %lu 条), 跳过写回剪贴板",
+                 -[latestItem.updatedAt timeIntervalSinceNow], (unsigned long)records.count];
+            } else {
+                // v1.3.16: 批次内无时间戳合理的最新内容 (远端脏数据)
+                [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"批次内无时间戳合理的最新内容 (共 %lu 条), 跳过写回剪贴板",
+                 (unsigned long)records.count];
             }
         }
     }
@@ -969,12 +980,18 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     return [self jsonResponse:@{@"collection": @"history", @"records": changed} statusCode:statusCode];
 }
 
-// v1.3.15: 写回剪贴板的新鲜度门槛 —— 仅"刚复制"的内容 (updatedAt 距今 <= 60 秒)
-// 才允许写回系统剪贴板。首次配对/重配对的全量同步会推来大量历史记录,
-// 若全部写回会把用户当前剪贴板顶成一条旧内容 (与拉取通道共用, 保持对称)。
-- (BOOL)shouldWriteBackToPasteboard:(QCClipItem *)item {
+// v1.3.16: 写回剪贴板门槛 —— 防"全量同步顶掉剪贴板", 但不误伤实时/手动增量同步。
+//   - 远端"刚复制"的内容 (updatedAt 距今 <= 60 秒) → 写回 (实时推送场景)
+//   - 小批量增量 (批次 <= 30 条) 且确比本地原有最新内容更新 → 写回 (用户点同步/增量拉取)
+//   - 全量批次 (首次配对/重配对推 100+ 条历史) → 不写回, 避免把用户当前剪贴板顶成旧内容
+// 修复 v1.3.15 回归: 旧版仅按 60 秒新鲜度判断, 用户点同步拉到的"几分钟前"内容全部被拦截,
+// 表现为"显示同步成功但手机端收不到复制" (日志: 拉取到的最新内容 updatedAt 距今 126 秒被跳过)。
+- (BOOL)shouldWriteBackToPasteboard:(QCClipItem *)item batchCount:(NSUInteger)batchCount newerThan:(NSDate *)localLatestBefore {
     NSTimeInterval age = -[item.updatedAt timeIntervalSinceNow];
-    return age <= 60.0;
+    if (age <= 60.0) return YES;
+    if (batchCount > 30) return NO;
+    if (!localLatestBefore) return YES;
+    return [item.updatedAt compare:localLatestBefore] == NSOrderedDescending;
 }
 
 - (NSData *)handleReceiveFavorites:(NSData *)body statusCode:(NSInteger *)statusCode {
@@ -1081,12 +1098,32 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         item.payload = [item.textRepresentation dataUsingEncoding:NSUTF8StringEncoding];
     }
 
-    long long createdAtMs = [record[@"created_at"] longLongValue];
-    long long updatedAtMs = [record[@"updated_at"] longLongValue];
-    item.createdAt = createdAtMs > 0 ? [NSDate dateWithTimeIntervalSince1970:createdAtMs / 1000.0] : [NSDate date];
-    item.updatedAt = updatedAtMs > 0 ? [NSDate dateWithTimeIntervalSince1970:updatedAtMs / 1000.0] : [NSDate date];
+    // v1.3.16: 时间解析兼容秒/毫秒, 并对无效时间戳(1970/未来)降级为 epoch 0,
+    // 避免远端脏数据抢占"最新内容"候选 (日志证据: 电脑端推送记录 updatedAt 解析为 1970-01-22)
+    item.createdAt = [self parseServerTime:record[@"created_at"] fallback:[NSDate date]];
+    item.updatedAt = [self parseServerTime:record[@"updated_at"] fallback:[NSDate date]];
     item.checkSum = [item computeCheckSum];
     return item;
+}
+
+// v1.3.16: 服务端时间戳解析 —— 兼容秒/毫秒两种单位, 明显无效的时间戳(早于 2000 年
+// 或晚于 now+24h)降级为 epoch 0, 使其不会成为"最新内容"候选。
+- (NSDate *)parseServerTime:(NSNumber *)num fallback:(NSDate *)fallback {
+    long long v = [num longLongValue];
+    if (v <= 0) return fallback;
+    if (v < 100000000000LL) v *= 1000;   // 秒级 → 毫秒 (正常毫秒值远大于 10^11)
+    double sec = v / 1000.0;
+    if (sec < 946684800.0 || sec > [NSDate date].timeIntervalSince1970 + 86400.0) {
+        return [NSDate dateWithTimeIntervalSince1970:0];   // 2000-01-01 之前 / 未来 1 天之外 → 无效
+    }
+    return [NSDate dateWithTimeIntervalSince1970:sec];
+}
+
+// v1.3.16: 时间戳是否合理 (2000-01-01 ~ now+24h), 用于过滤"最新内容"候选
+- (BOOL)isValidUpdateTime:(NSDate *)date {
+    if (!date) return NO;
+    NSTimeInterval t = date.timeIntervalSince1970;
+    return t >= 946684800.0 && t <= [NSDate date].timeIntervalSince1970 + 86400.0;
 }
 
 - (NSString *)contentTypeForItemType:(QCClipType)type {
@@ -1949,6 +1986,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         NSArray *records = [batch isKindOfClass:[NSDictionary class]] ? batch[@"records"] : nil;
         NSUInteger count = 0;
         QCClipItem *newestNewItem = nil;   // 本次拉取到的最新"新增"记录 (按更新时间)
+        // v1.3.16: 记录本次拉取前本地库最新时间, 供写回门槛做相对新旧判断
+        NSDate *localLatestBefore = [[QCStore sharedStore] latestItemUpdatedAt];
         if ([records isKindOfClass:[NSArray class]]) {
             NSMutableArray *received = [NSMutableArray array];
             for (NSDictionary *dict in records) {
@@ -1958,7 +1997,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 if (!existing) {
                     [[QCStore sharedStore] saveItem:item];
                     count++;
-                    if (!newestNewItem || [item.updatedAt compare:newestNewItem.updatedAt] == NSOrderedDescending) {
+                    // v1.3.16: 过滤不合理时间戳(1970/未来), 防远端脏数据抢占候选
+                    if ([self isValidUpdateTime:item.updatedAt] &&
+                        (!newestNewItem || [item.updatedAt compare:newestNewItem.updatedAt] == NSOrderedDescending)) {
                         newestNewItem = item;
                     }
                 }
@@ -1978,15 +2019,22 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 }
                 // 关键修复: 拉取到的新增记录写入系统剪贴板, 用户可直接粘贴
                 // v1.3.8: suppressBroadcast=YES 避免把刚拉取的内容反向推回电脑
-                // v1.3.15: 与接收通道共用新鲜度门槛, 全量拉取的历史不写回, 避免顶掉用户当前剪贴板
-                if (newestNewItem && [self shouldWriteBackToPasteboard:newestNewItem]) {
+                // v1.3.16: 与接收通道共用新门槛 —— 实时内容写回; 小批量增量且比本地最新更新写回;
+                //          全量拉取(首次配对, 如 180 条)不写回, 避免顶掉用户当前剪贴板
+                if (newestNewItem && [self shouldWriteBackToPasteboard:newestNewItem
+                                                            batchCount:count
+                                                             newerThan:localLatestBefore]) {
                     [[QCClipManager sharedManager] writeItemToPasteboard:newestNewItem suppressBroadcast:YES];
                     NSString *preview = newestNewItem.textRepresentation;
                     if (preview.length > 40) preview = [preview substringToIndex:40];
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把拉取内容写入剪贴板: %@", preview];
                 } else if (newestNewItem) {
-                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取到的最新内容不是实时内容 (updatedAt 距今 %.0f 秒), 跳过写回剪贴板",
-                     -[newestNewItem.updatedAt timeIntervalSinceNow]];
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取到的最新内容不是实时内容 (updatedAt 距今 %.0f 秒, 新增 %lu 条), 跳过写回剪贴板",
+                     -[newestNewItem.updatedAt timeIntervalSinceNow], (unsigned long)count];
+                } else {
+                    // v1.3.16: 拉取到的新增记录无时间戳合理候选 (远端脏数据)
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取批次内无时间戳合理的最新内容 (新增 %lu 条), 跳过写回剪贴板",
+                     (unsigned long)count];
                 }
             }
         }

@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<QCClipItem *> *)itemsWithType:(QCClipType)type;
 - (NSArray<QCClipItem *> *)favoriteItems;
 - (nullable QCClipItem *)itemWithCheckSum:(NSString *)checkSum;
+// v1.3.16: 本地库最新一条记录的更新时间 (写回剪贴板门槛的相对新旧判断)
+- (nullable NSDate *)latestItemUpdatedAt;
 - (BOOL)saveItem:(QCClipItem *)item;
 - (BOOL)deleteItem:(QCClipItem *)item;
 - (BOOL)updateItem:(QCClipItem *)item;
