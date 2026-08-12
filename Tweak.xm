@@ -160,7 +160,8 @@ static id QCUNCenter(void) {
             id center = QCUNCenter();
             if (center) {
                 QCNotifDelegate = [[QCNotificationDelegate alloc] init];
-                [center setDelegate:QCNotifDelegate];
+                // setDelegate: 用 performSelector 规避 Theos SDK 头文件误解析
+                [center performSelector:@selector(setDelegate:) withObject:QCNotifDelegate];
                 NSLog(@"[QuickClipboard] UNUserNotificationCenter delegate 已设置 (SpringBoard)");
             }
         }

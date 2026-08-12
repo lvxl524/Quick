@@ -266,27 +266,38 @@ static id QCUNCenter(void) {
         [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"系统不支持本地通知, 无法弹横幅"];
         return;
     }
-    [center getNotificationSettingsWithCompletionHandler:^(id settings) {
+    // Theos SDK 下 UserNotifications 头文件方法查找异常, 全部 runtime 调用 (与 Tweak.xm 一致)。
+    typedef void (*MsgSend1)(id, SEL, id);
+    MsgSend1 msgSend1 = (MsgSend1)objc_msgSend;
+    msgSend1(center, NSSelectorFromString(@"getNotificationSettingsWithCompletionHandler:"), ^(id settings) {
         // UNAuthorizationStatus: NotDetermined=0 Denied=1 Authorized=2 Provisional=3
-        NSInteger status = [settings respondsToSelector:@selector(authorizationStatus)]
-            ? (NSInteger)[settings authorizationStatus] : -1;
+        NSInteger status = -1;
+        SEL statusSel = NSSelectorFromString(@"authorizationStatus");
+        if ([settings respondsToSelector:statusSel]) {
+            typedef NSInteger (*MsgSend0)(id, SEL);
+            MsgSend0 msgSend0 = (MsgSend0)objc_msgSend;
+            status = msgSend0(settings, statusSel);
+        }
         if (status == 0) {
             // 首次请求通知权限 (系统弹窗, 用户允许后显示横幅)
-            [center requestAuthorizationWithOptions:(1 | 2 | 4)  // Alert|Sound|Badge
-                                  completionHandler:^(BOOL granted, NSError *error) {
+            typedef void (*MsgSend2)(id, SEL, NSUInteger, id);
+            MsgSend2 msgSend2 = (MsgSend2)objc_msgSend;
+            msgSend2(center, NSSelectorFromString(@"requestAuthorizationWithOptions:completionHandler:"),
+                     (1 | 2 | 4),  // Alert|Sound|Badge
+                     ^(BOOL granted, NSError *error) {
                 if (granted) {
                     [self postReceivedLocalNotificationWithCount:count];
                 } else {
                     [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限被拒绝, 无法弹横幅提示 (%@)",
                      error ? error.localizedDescription : @"用户拒绝"];
                 }
-            }];
+            });
         } else if (status == 2 || status == 3) {
             [self postReceivedLocalNotificationWithCount:count];
         } else {
             [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限未开启, 无法弹横幅提示 (状态 %ld)", (long)status];
         }
-    }];
+    });
 }
 
 - (void)postReceivedLocalNotificationWithCount:(NSInteger)count {
@@ -311,13 +322,17 @@ static id QCUNCenter(void) {
                           [[NSUUID UUID] UUIDString], content, nil);
     if (!request) return;
 
-    [center addNotificationRequest:request withCompletionHandler:^(NSError *error) {
+    // addNotificationRequest:withCompletionHandler: 同样 runtime 调用
+    typedef void (*MsgSend2b)(id, SEL, id, id);
+    MsgSend2b msgSend2b = (MsgSend2b)objc_msgSend;
+    msgSend2b(center, NSSelectorFromString(@"addNotificationRequest:withCompletionHandler:"), request,
+              ^(NSError *error) {
         if (error) {
             [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"发送系统通知失败: %@", error.localizedDescription];
         } else {
             [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已弹系统横幅通知 (%ld 条)", (long)count];
         }
-    }];
+    });
 }
 
 - (NSString *)deviceID {
