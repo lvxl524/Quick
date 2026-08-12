@@ -154,7 +154,7 @@ static const unsigned long long kMaxFileBytes = 512 * 1024;
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!text || text.length == 0) return @[];
     NSMutableArray *lines = [[text componentsSeparatedByString:@"\n"] mutableCopy];
-    while (lines.lastObject.length == 0) [lines removeLastObject];
+    while ([(NSString *)[lines lastObject] length] == 0) [lines removeLastObject];
     return lines;
 }
 
