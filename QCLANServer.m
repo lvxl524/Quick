@@ -24,6 +24,9 @@ static const NSInteger      kPairCodeMaxAttempts = 5;
 // 本地管理端点仅允许 loopback 访问
 static NSString * const kLoopbackIP = @"127.0.0.1";
 
+// 局域网服务主开关变更通知 (Darwin 通知, 跨进程送达所有已运行实例, 含 SpringBoard 服务进程)
+static NSString * const kLANServiceNotify = @"com.mosheng.quickclipboard.lanService";
+
 // 请求体上限 (与桌面端 MAX_REQUEST_BODY_SIZE 对齐, 直传暂支持到 512MB)
 static const NSUInteger kMaxRequestBodySize = 512 * 1024 * 1024;
 
@@ -73,6 +76,21 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 }
 @end
 
+#pragma mark - 主开关跨进程通知回调
+
+// 收到 Darwin 通知后, 按最新持久化偏好同步启停本实例的局域网服务。
+// 关键: tweak 注入多进程, 真正常驻服务的是 SpringBoard 进程; 通过通知让所有实例
+// (含 SpringBoard) 一致地 start/stop, 不依赖"设置页进程是否还活着"。
+static void QCServiceControlNotify(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    QCLANServer *self = (__bridge QCLANServer *)observer;
+    BOOL enabled = [QCLANPrefs boolForKey:@"lanServiceEnabled" defaultValue:YES];
+    if (enabled) {
+        [self start];
+    } else {
+        [self stop];
+    }
+}
+
 @implementation QCLANServer
 
 + (instancetype)sharedServer {
@@ -96,6 +114,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         _listenSocket = 0;
         _discoverySocket = 0;
         _running = NO;
+        // v1.3.18: 注册主开关 Darwin 通知, 让本实例随持久化偏好一致启停
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)(self), QCServiceControlNotify,
+            (__bridge CFStringRef)kLANServiceNotify, NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
         [self ensurePairingCode];
         [self loadPeers];
     }
@@ -263,6 +286,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
 - (void)start {
     dispatch_async(_queue, ^{
+        // v1.3.18: 主开关 (lanServiceEnabled) 关闭时, 即便 Tweak %ctor 无条件调用 start 也不启动,
+        // 保证"关闭 HTTP 服务"在注销/重启后依然生效, 且桌面端无法再发现本机。
+        if (![QCLANPrefs boolForKey:@"lanServiceEnabled" defaultValue:YES]) {
+            [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"局域网服务按设置保持关闭 (lanServiceEnabled=NO), 跳过启动"];
+            return;
+        }
         if (self->_running) {
             NSLog(@"[QuickClipboard] LAN server already running");
             return;
@@ -575,6 +604,23 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [self refreshPairCode];
         responseData = [self jsonResponse:@{@"code": self.pairCode} statusCode:&statusCode];
         [[QCLANLogger sharedLogger] info:@"UI" fmt:@"本地UI刷新配对码: %@", self.pairCode];
+
+    // POST /control/lan-service —— 本地 UI 控制"局域网服务主开关"
+    // 注意: tweak 被注入到多个进程, 真正持有端口(在监听)的进程才是服务进程。
+    // 该请求只能到达正在监听的进程, 因此由它自身执行 start/stop 才是最准确的。
+    // 关闭时彻底停止 HTTP + UDP 发现 + Bonjour, 桌面端扫描将无法再发现本机。
+    } else if ([path isEqualToString:@"/control/lan-service"] && [method isEqualToString:@"POST"] && [address isEqualToString:kLoopbackIP]) {
+        NSDictionary *req = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+        BOOL enabled = req[@"enabled"] ? [req[@"enabled"] boolValue] : YES;
+        [QCLANPrefs setBool:enabled forKey:@"lanServiceEnabled"];
+        if (enabled) {
+            [self start];
+            responseData = [self jsonResponse:@{@"ok": @YES, @"running": @YES} statusCode:&statusCode];
+        } else {
+            [self stop];
+            responseData = [self jsonResponse:@{@"ok": @YES, @"running": @NO} statusCode:&statusCode];
+        }
+        [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"本地控制: 局域网服务主开关 -> %@", enabled ? @"开" : @"关"];
 
     // GET /scan —— 本地 UI 触发扫描
     } else if ([path isEqualToString:@"/scan"] && [method isEqualToString:@"GET"] && [address isEqualToString:kLoopbackIP]) {

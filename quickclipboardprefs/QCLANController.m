@@ -8,6 +8,7 @@
 #import <arpa/inet.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 
@@ -179,7 +180,9 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.receiveEnabled = [QCLANPrefs boolForKey:@"lanReceiveEnabled" defaultValue:YES];
     self.notifyEnabled  = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
     self.pairCodeVisible = YES;
-    self.httpRunning = YES;
+    // v1.3.18: 开关初值取自主开关持久化状态 (lanServiceEnabled), 而非硬编码 YES,
+    // 保证打开设置页时显示的是真实/上次保存的状态。
+    self.httpRunning = [QCLANPrefs boolForKey:@"lanServiceEnabled" defaultValue:YES];
 
     self.pairingCode = [self.defaults stringForKey:@"lanPairingCode"];
     if (!self.pairingCode || self.pairingCode.length == 0) {
@@ -1048,10 +1051,21 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 #pragma mark - Actions
 
 - (void)serviceToggled:(UISwitch *)sender {
-    // The tweak process always runs the server. This toggle is for intent.
-    self.httpRunning = sender.on;
-    [QCLANPrefs setBool:self.httpRunning forKey:@"lanReceiveEnabled"];
-    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换服务开关 -> %@", sender.on ? @"开" : @"关"];
+    // v1.3.18: 真正的"局域网服务(HTTP)主开关"。
+    // 持久化 lanServiceEnabled: 注销/重启后 Tweak %ctor 的 start 受其拦截, 设置依然生效。
+    // 通过 Darwin 通知让所有已运行实例(含 SpringBoard 常驻服务进程)同步启停,
+    // 不依赖"设置页进程是否还活着"; 关闭后彻底停掉 HTTP + UDP 发现 + Bonjour, 桌面端扫描将无法再发现本机。
+    BOOL on = sender.on;
+    self.httpRunning = on;
+    [QCLANPrefs setBool:on forKey:@"lanServiceEnabled"];
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换局域网服务主开关 -> %@", on ? @"开" : @"关"];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.mosheng.quickclipboard.lanService"),
+        NULL, NULL, YES);
+    // 稍后刷新真实运行状态
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self refreshServerStatus];
+    });
     [self buildUI];
 }
 
