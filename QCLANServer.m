@@ -946,7 +946,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         }
         if (changed.count > 0) {
             [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
-            BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
+            BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:YES];
             if (notifyEnabled) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:QCLANSyncReceivedNotification
@@ -1062,6 +1062,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     record[@"content_type"] = [self contentTypeForItemType:item.type];
     if (item.type == QCClipTypeImage) {
         record[@"image_id"] = item.uuid;
+        // v1.3.17: 内联图片二进制 (base64), 让桌面端无需回拉即可渲染,
+        // 解决"电脑端显示 [图片] 占位"——桌面端收到记录后直接解码 image_data 即可。
+        if (item.payload.length > 0) {
+            record[@"image_data"] = [item.payload base64EncodedStringWithOptions:0];
+        }
     }
     if (item.textRepresentation.length > 0) {
         NSString *title = item.textRepresentation;
@@ -1080,22 +1085,46 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSString *uuid = record[@"uuid"];
     if (uuid.length == 0) return nil;
 
+    NSString *content = record[@"content"] ?: @"";
+    NSString *contentType = record[@"content_type"] ?: @"text/plain";
+    NSString *deviceId = record[@"source_device_id"] ?: [self deviceId];
+
     QCClipItem *item = [[QCClipItem alloc] init];
     item.uuid = uuid;
-    item.deviceID = record[@"source_device_id"] ?: [self deviceId];
-    item.textRepresentation = record[@"content"] ?: @"";
-    NSString *contentType = record[@"content_type"] ?: @"text/plain";
-    item.type = [self itemTypeForContentType:contentType];
+    item.deviceID = deviceId;
 
-    if (item.type == QCClipTypeImage) {
-        // 图片: 尝试按 image_id 从本机库取 payload, 否则以文本占位
-        NSString *imageId = record[@"image_id"];
-        if (imageId.length > 0) {
-            NSData *payload = [self imageDataForImageId:imageId];
-            if (payload) item.payload = payload;
+    // v1.3.17: 兼容桌面端"文件复制"信封 files:{...}
+    //   电脑复制图片时, 桌面端发来的 content 形如:
+    //   files:{"files":[{"path":"clipboard_images/xxx.png","file_type":"PNG",...}],"operation":"copy"}
+    //   需解析出图片路径, 再从来源设备拉取真实二进制, 否则手机会收到一堆 JSON 文本。
+    NSString *imagePath = nil;
+    if ([self isFilesEnvelope:content imagePathOut:&imagePath]) {
+        NSData *img = [self fetchBinaryFromPeer:deviceId path:imagePath logContext:@"files信封"];
+        if (img) {
+            item.type = QCClipTypeImage;
+            item.payload = img;
+            item.textRepresentation = [imagePath lastPathComponent];
+        } else {
+            // 拉取失败: 退化为纯文本保存原始 JSON, 至少不丢信息
+            item.type = [self itemTypeForContentType:contentType];
+            item.textRepresentation = content;
+            item.payload = [content dataUsingEncoding:NSUTF8StringEncoding];
         }
     } else {
-        item.payload = [item.textRepresentation dataUsingEncoding:NSUTF8StringEncoding];
+        item.textRepresentation = content;
+        item.type = [self itemTypeForContentType:contentType];
+        if (item.type == QCClipTypeImage) {
+            // 标准图片协议: 先查本机库, 没有再按 image_id 从来源设备回拉二进制
+            NSString *imageId = record[@"image_id"];
+            NSData *payload = nil;
+            if (imageId.length > 0) {
+                payload = [self imageDataForImageId:imageId];
+                if (!payload) payload = [self fetchBinaryFromPeer:deviceId path:imageId logContext:@"image_id"];
+            }
+            if (payload) item.payload = payload;
+        } else {
+            item.payload = [content dataUsingEncoding:NSUTF8StringEncoding];
+        }
     }
 
     // v1.3.16: 时间解析兼容秒/毫秒, 并对无效时间戳(1970/未来)降级为 epoch 0,
@@ -1104,6 +1133,123 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     item.updatedAt = [self parseServerTime:record[@"updated_at"] fallback:[NSDate date]];
     item.checkSum = [item computeCheckSum];
     return item;
+}
+
+// v1.3.17: 判断 content 是否为桌面端"文件复制"信封, 并取出其中第一个图片文件的相对路径。
+//   支持两种写法: "files:{...}" (带前缀) 与纯 JSON {"files":[...]}。
+//   图片判定: file_type 属于图片类型, 或 path 扩展名属于图片格式。
+- (BOOL)isFilesEnvelope:(NSString *)content imagePathOut:(NSString * __autoreleasing *)outPath {
+    if (content.length == 0) return NO;
+    NSString *jsonStr = content;
+    if ([content hasPrefix:@"files:"]) jsonStr = [content substringFromIndex:6];
+    NSData *d = [jsonStr dataUsingEncoding:NSUTF8StringEncoding];
+    if (!d) return NO;
+    id obj = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+    if (![obj isKindOfClass:[NSDictionary class]]) return NO;
+    NSArray *files = obj[@"files"];
+    if (![files isKindOfClass:[NSArray class]] || files.count == 0) return NO;
+    NSArray<NSString *> *types = @[@"PNG",@"JPG",@"JPEG",@"GIF",@"WEBP",@"BMP",@"HEIC",@"TIFF"];
+    NSArray<NSString *> *exts  = @[@"png",@"jpg",@"jpeg",@"gif",@"webp",@"bmp",@"heic",@"tiff"];
+    for (NSDictionary *f in files) {
+        if (![f isKindOfClass:[NSDictionary class]]) continue;
+        NSString *path = f[@"path"];
+        NSString *ft = [f[@"file_type"] uppercaseString];
+        if (ft.length && [types containsObject:ft]) {
+            if (outPath) *outPath = path;
+            return YES;
+        }
+        NSString *ext = [path pathExtension].lowercaseString;
+        if (ext.length && [exts containsObject:ext]) {
+            if (outPath) *outPath = path;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// v1.3.17: 按 device_id 找到配对设备 baseURL, 尝试多种候选路径拉取二进制。
+//   候选顺序: /qc-sync/files/<path> (与本机服务端对称) → /files/<path> → /<path>
+//   任一成功即返回; 全部失败返回 nil (调用方退化为文本保存)。
+- (NSData *)fetchBinaryFromPeer:(NSString *)deviceId path:(NSString *)relPath logContext:(NSString *)ctx {
+    if (relPath.length == 0) return nil;
+    NSString *baseURL = nil;
+    for (QCLANPeer *p in _peers) {
+        if ([p.deviceId isEqualToString:deviceId]) { baseURL = p.baseURL; break; }
+    }
+    if (!baseURL && _peers.count > 0) baseURL = [_peers.firstObject baseURL]; // 兜底: 唯一配对设备
+    if (!baseURL) {
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"%@ 拉取图片失败: 找不到配对设备 (device=%@)", ctx ?: @"", deviceId ?: @"?"];
+        return nil;
+    }
+    NSArray<NSString *> *candidates = @[
+        [baseURL stringByAppendingString:[@"/qc-sync/files/" stringByAppendingString:relPath]],
+        [baseURL stringByAppendingString:[@"/files/" stringByAppendingString:relPath]],
+        [baseURL stringByAppendingString:[@"/" stringByAppendingString:relPath]],
+    ];
+    for (NSString *urlStr in candidates) {
+        NSData *data = [self httpGetData:urlStr timeout:5.0];
+        if (data.length > 0) {
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"%@ 从 peer 拉取图片成功: %@ (%lu 字节)", ctx ?: @"", urlStr, (unsigned long)data.length];
+            return data;
+        }
+    }
+    [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"%@ 从 peer 拉取图片失败 (device=%@, path=%@)", ctx ?: @"", deviceId ?: @"?", relPath];
+    return nil;
+}
+
+// v1.3.17: 同步 GET 拉取原始二进制 (图片)。复用连接代理关闭 + 信号量等待, 与 httpGetJSON 一致。
+- (NSData *)httpGetData:(NSString *)urlString timeout:(NSTimeInterval)timeout {
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return nil;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:timeout];
+    req.HTTPMethod = @"GET";
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.connectionProxyDictionary = @{};
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    __block NSData *result = nil;
+    __block NSError *capturedError = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (data && !err && [(NSHTTPURLResponse *)resp statusCode] == 200) {
+            result = data;
+        } else if (err) {
+            capturedError = err;
+        }
+        dispatch_semaphore_signal(sem);
+    }] resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((timeout + 1) * NSEC_PER_SEC)));
+    if (capturedError) {
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"GET %@ 失败: %@ (code=%ld)",
+         urlString, capturedError.localizedDescription ?: @"?", (long)capturedError.code];
+    }
+    return result;
+}
+
+// v1.3.17: 推送前把图片二进制 PUT 到桌面端 /qc-sync/files/<image_id>, 异步无阻塞。
+- (void)uploadImageToPeer:(QCLANPeer *)peer imageId:(NSString *)imageId data:(NSData *)data {
+    if (data.length == 0 || imageId.length == 0 || peer.baseURL.length == 0) return;
+    NSString *urlStr = [peer.baseURL stringByAppendingString:[@"/qc-sync/files/" stringByAppendingString:imageId]];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+    req.HTTPMethod = @"PUT";
+    req.HTTPBody = data;
+    [req setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+    if (peer.peerToken.length > 0) {
+        [req setValue:[NSString stringWithFormat:@"Bearer %@", peer.peerToken] forHTTPHeaderField:@"Authorization"];
+    }
+    req.timeoutInterval = 15.0;
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.connectionProxyDictionary = @{};
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    [[session dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
+        NSInteger code = [(NSHTTPURLResponse *)resp statusCode];
+        if (err || code != 200) {
+            [[QCLANLogger sharedLogger] warn:@"NET" fmt:@"上传图片到 %@ 失败 (code=%ld): %@", peer.baseURL, (long)code, err.localizedDescription ?: @"?"];
+        } else {
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已上传图片 %@ 到 %@", imageId, peer.baseURL];
+        }
+    }] resume];
 }
 
 // v1.3.16: 服务端时间戳解析 —— 兼容秒/毫秒两种单位, 明显无效的时间戳(早于 2000 年
@@ -1755,7 +1901,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     }
     if (receivedNew) {
         [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
-        BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
+        BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:YES];
         if (notifyEnabled) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCLANSyncReceivedNotification
@@ -1863,6 +2009,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSMutableArray *records = [NSMutableArray array];
     for (QCClipItem *item in items) {
         [records addObject:[self cloudRecordFromItem:item]];
+        // v1.3.17: 推送前主动把图片二进制 PUT 到桌面端 /qc-sync/files/<image_id>,
+        // 与内联 image_data 双保险, 让桌面端拿到真实图片而非 [图片] 占位。
+        if (item.type == QCClipTypeImage && item.payload.length > 0) {
+            [self uploadImageToPeer:peer imageId:item.uuid data:item.payload];
+        }
     }
     if (records.count == 0) {
         // 本机没有记录时明确提示, 避免"点了没反应"的困惑
@@ -2008,7 +2159,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
                 // v1.3.9 修复: 轮询拉取到新增内容时, 按"同步通知"开关弹通知提示,
                 // 与 handleReceiveHistory 行为一致 (旧版拉取通道从不发通知, 用户无感知)。
-                BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:NO];
+                BOOL notifyEnabled = [QCLANPrefs boolForKey:@"lanSyncNotifyEnabled" defaultValue:YES];
                 if (notifyEnabled) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [[NSNotificationCenter defaultCenter] postNotificationName:QCLANSyncReceivedNotification
