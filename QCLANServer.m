@@ -1,5 +1,6 @@
 #import "QCLANServer.h"
 #import "QCStore.h"
+#import "QCLANLogger.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -196,6 +197,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     }
     if (migrated.count > 0) [self savePeers];
     NSLog(@"[QuickClipboard] Loaded %lu paired peers", (unsigned long)_peers.count);
+    [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"加载已配对设备 %lu 台 (peers.plist)", (unsigned long)_peers.count];
 }
 
 - (void)reloadPeers {
@@ -246,12 +248,16 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             return;
         }
         NSLog(@"[QuickClipboard] Starting LAN server...");
+        [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"启动局域网服务: device_id=%@ 配对码=%@",
+         [self deviceId], self.pairCode];
         [self startHTTPServer];
         [self startDiscoveryListener];
         self->_running = YES;
         [self publishBonjour];
         NSLog(@"[QuickClipboard] LAN server started on port %d, device_id: %@, pair code: %@",
               kDefaultLANPort, [self deviceId], self.pairCode);
+        [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"局域网服务已启动 (HTTP %d / UDP %d), 本机IP: %@",
+         kDefaultLANPort, kDiscoveryPort, [self primaryLocalIP] ?: @"?"];
     });
 }
 
@@ -288,6 +294,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     _listenSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (_listenSocket < 0) {
         NSLog(@"[QuickClipboard] ERROR: Failed to create TCP socket: %s", strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"创建 TCP socket 失败: %s", strerror(errno)];
         return;
     }
 
@@ -302,6 +309,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     if (bind(_listenSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         NSLog(@"[QuickClipboard] ERROR: Failed to bind TCP port %d: %s", kDefaultLANPort, strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"HTTP 端口 %d 绑定失败: %s (可能被其他进程占用)", kDefaultLANPort, strerror(errno)];
         close(_listenSocket);
         _listenSocket = 0;
         return;
@@ -309,6 +317,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     if (listen(_listenSocket, 32) < 0) {
         NSLog(@"[QuickClipboard] ERROR: Failed to listen: %s", strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"HTTP listen 失败: %s", strerror(errno)];
         close(_listenSocket);
         _listenSocket = 0;
         return;
@@ -477,6 +486,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSData *body     = request[@"body"];
 
     NSLog(@"[QuickClipboard] HTTP %@ %@ from %@", method, path, address);
+    [[QCLANLogger sharedLogger] info:@"NET" fmt:@"HTTP %@ %@ 来自 %@", method, path, address];
 
     NSInteger statusCode = 200;
     NSData *responseData = nil;
@@ -492,6 +502,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             @"protocol":    kHTTPProtocol,
             @"version":     @1,
         } statusCode:&statusCode];
+        [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"响应 hello 请求: device_id=%@", [self deviceId]];
 
     // POST /qc-sync/pairing/confirm —— 无需授权
     } else if ([path isEqualToString:@"/qc-sync/pairing/confirm"] && [method isEqualToString:@"POST"]) {
@@ -513,6 +524,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     } else if ([path isEqualToString:@"/pair-code"] && [method isEqualToString:@"POST"] && [address isEqualToString:kLoopbackIP]) {
         [self refreshPairCode];
         responseData = [self jsonResponse:@{@"code": self.pairCode} statusCode:&statusCode];
+        [[QCLANLogger sharedLogger] info:@"UI" fmt:@"本地UI刷新配对码: %@", self.pairCode];
 
     // GET /scan —— 本地 UI 触发扫描
     } else if ([path isEqualToString:@"/scan"] && [method isEqualToString:@"GET"] && [address isEqualToString:kLoopbackIP]) {
@@ -522,6 +534,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             [jsonDevices addObject:[self peerJSON:p]];
         }
         responseData = [self jsonResponse:@{@"devices": jsonDevices} statusCode:&statusCode];
+        [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"本地UI触发扫描: 发现 %lu 台设备", (unsigned long)results.count];
 
     // POST /pair —— 本地 UI 发起配对 (走 /qc-sync/hello + /qc-sync/pairing/confirm)
     } else if ([path isEqualToString:@"/pair"] && [method isEqualToString:@"POST"] && [address isEqualToString:kLoopbackIP]) {
@@ -537,9 +550,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             BOOL ok = [self verifyAndPairAddress:pairAddr port:port code:pairCode];
             if (ok) {
                 responseData = [self jsonResponse:@{@"ok": @YES, @"message": @"配对成功"} statusCode:&statusCode];
+                [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"本地UI配对成功: %@", pairAddr];
             } else {
                 responseData = [self jsonResponse:@{@"error": @"配对失败：无法验证配对码或设备不可达"} statusCode:&statusCode];
                 statusCode = 400;
+                [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"本地UI配对失败: %@ (码 %@)", pairAddr, pairCode];
             }
         }
 
@@ -556,6 +571,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         NSString *deviceId = [[path substringFromIndex:7] stringByRemovingPercentEncoding];
         [self removePeerByDeviceId:deviceId];
         responseData = [self jsonResponse:@{@"ok": @YES} statusCode:&statusCode];
+        [[QCLANLogger sharedLogger] info:@"UI" fmt:@"本地UI删除已配对设备: %@", deviceId];
 
     // GET /sync —— 本地 UI 拉取全部
     } else if ([path isEqualToString:@"/sync"] && [method isEqualToString:@"GET"] && [address isEqualToString:kLoopbackIP]) {
@@ -637,10 +653,15 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         } else {
             responseData = [self jsonResponse:@{@"message": @"未找到接口"} statusCode:&statusCode];
             statusCode = 404;
+            [[QCLANLogger sharedLogger] warn:@"NET" fmt:@"已授权但未找到接口: %@ %@", method, path];
         }
     } else {
         responseData = [self jsonResponse:@{@"message": @"未授权的局域网同步请求"} statusCode:&statusCode];
         statusCode = 403;
+        NSString *auth = headers[@"authorization"] ?: @"(无)";
+        NSString *xid  = headers[@"x-device-id"] ?: @"(无)";
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"鉴权失败: %@ %@ 来自 %@ (Authorization=%@, X-Device-Id=%@)",
+         method, path, address, auth, xid];
     }
 
     [self sendHTTPResponse:clientSocket statusCode:statusCode body:responseData contentType:contentType];
@@ -672,6 +693,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSDictionary *req = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
     if (![req isKindOfClass:[NSDictionary class]]) {
         if (statusCode) *statusCode = 400;
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"配对确认: 请求体解析失败 (来自 %@)", remoteIP];
         return [self jsonResponse:@{@"message": @"解析配对请求失败"} statusCode:statusCode];
     }
 
@@ -682,14 +704,19 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     if (deviceId.length == 0) {
         if (statusCode) *statusCode = 400;
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"配对确认: 设备ID为空 (来自 %@)", remoteIP];
         return [self jsonResponse:@{@"message": @"设备 ID 不能为空"} statusCode:statusCode];
     }
     if ([deviceId isEqualToString:[self deviceId]]) {
         if (statusCode) *statusCode = 400;
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"配对确认: 拒绝与本机自身配对 (来自 %@)", remoteIP];
         return [self jsonResponse:@{@"message": @"不能配对当前设备自身"} statusCode:statusCode];
     }
     if (![self verifyPairingCode:pairCode]) {
         if (statusCode) *statusCode = 400;
+        NSInteger attempts = [[NSUserDefaults standardUserDefaults] integerForKey:kPairCodeAttemptsDefaultsKey];
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"配对确认: 配对码错误/过期 (输入=%@, 已失败%d/5, 来自 %@)",
+         pairCode ?: @"空", (int)attempts, remoteIP];
         return [self jsonResponse:@{@"message": @"配对码不正确或已过期"} statusCode:statusCode];
     }
 
@@ -734,6 +761,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     });
 
     NSLog(@"[QuickClipboard] Paired with %@ (%@ via %@)", deviceName, deviceId, baseURL);
+    [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"配对成功: %@ (%@, base=%@, token=%@…)",
+     deviceName ?: @"?", deviceId, baseURL, peerToken.length > 12 ? [peerToken substringToIndex:12] : peerToken];
 
     if (statusCode) *statusCode = 200;
     return [self jsonResponse:@{@"peer_token": peerToken, @"expires_at_ms": [NSNull null]} statusCode:statusCode];
@@ -849,6 +878,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             }
         }
     }
+    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"收到 %lu 条历史记录, 变更 %lu 条",
+     (unsigned long)records.count, (unsigned long)changed.count];
     if (statusCode) *statusCode = 200;
     return [self jsonResponse:@{@"collection": @"history", @"records": changed} statusCode:statusCode];
 }
@@ -989,6 +1020,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     _discoverySocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (_discoverySocket < 0) {
         NSLog(@"[QuickClipboard] ERROR: Failed to create discovery UDP socket: %s", strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"创建 UDP 发现 socket 失败: %s", strerror(errno)];
         return;
     }
 
@@ -1004,6 +1036,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     if (bind(_discoverySocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         NSLog(@"[QuickClipboard] ERROR: Failed to bind discovery port %d: %s", kDiscoveryPort, strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"UDP 发现端口 %d 绑定失败: %s", kDiscoveryPort, strerror(errno)];
         close(_discoverySocket);
         _discoverySocket = 0;
         return;
@@ -1048,7 +1081,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSString *deviceName = packet[@"device_name"] ?: @"Unknown";
     NSNumber *httpPort = packet[@"http_port"];
 
-    if (![protocol isEqualToString:kDiscoveryProtocol]) return;
+    if (![protocol isEqualToString:kDiscoveryProtocol]) {
+        [[QCLANLogger sharedLogger] warn:@"NET" fmt:@"收到非本协议 UDP 包 (protocol=%@) 来自 %@, 忽略",
+         protocol ?: @"空", senderIP];
+        return;
+    }
     if ([deviceId isEqualToString:[self deviceId]]) return; // 忽略自己
 
     if ([kind isEqualToString:@"request"]) {
@@ -1065,6 +1102,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                              (struct sockaddr *)&senderAddr, senderLen);
         NSLog(@"[QuickClipboard] Discovery response sent to %@:%d (%zd bytes)",
               senderIP, ntohs(senderAddr.sin_port), sent);
+        [[QCLANLogger sharedLogger] info:@"NET" fmt:@"收到发现请求, 已回复响应包给 %@ (%zd bytes)",
+         senderIP, sent];
 
     } else if ([kind isEqualToString:@"response"]) {
         // 收到发现响应 → 记录 peer
@@ -1093,6 +1132,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             _discoveredPeers[peer.deviceId] = peer;
         }
         NSLog(@"[QuickClipboard] Discovered: %@ (%@, base: %@, paired=%d)", deviceName, deviceId, baseURL, peer.paired);
+        [[QCLANLogger sharedLogger] info:@"NET" fmt:@"发现设备: %@ (%@, base=%@, 已配对=%d)",
+         deviceName, deviceId, baseURL, peer.paired];
     }
 }
 
@@ -1107,6 +1148,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
 - (void)performScanWithCompletion:(void (^)(NSArray<QCLANPeer *> *devices))completion {
     [_discoveredPeers removeAllObjects];
+    [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"开始扫描局域网 (UDP %d, 持续3秒)", kDiscoveryPort];
     [self sendDiscoveryBroadcast];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), _queue, ^{
@@ -1116,7 +1158,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             NSArray *results = [self->_discoveredPeers.allValues sortedArrayUsingComparator:^NSComparisonResult(QCLANPeer *a, QCLANPeer *b) {
                 return [a.name compare:b.name];
             }];
-
+            [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"扫描完成: 发现 %lu 台设备", (unsigned long)results.count];
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(results);
             });
@@ -1162,6 +1204,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     int sendSock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sendSock < 0) {
         NSLog(@"[QuickClipboard] ERROR: Failed to create broadcast socket: %s", strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"创建广播 socket 失败: %s", strerror(errno)];
         return;
     }
 
@@ -1215,6 +1258,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     close(sendSock);
     NSLog(@"[QuickClipboard] Discovery request broadcast sent (protocol %@)", kDiscoveryProtocol);
+    [[QCLANLogger sharedLogger] info:@"NET" fmt:@"发送 UDP 发现广播 (255.255.255.255:%d + 各子网广播)",
+     kDiscoveryPort];
 }
 
 
@@ -1242,9 +1287,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSString *baseURL = [NSString stringWithFormat:@"http://%@:%hu", address, port];
 
     // Step 1: GET /qc-sync/hello 获取设备信息并校验协议
+    [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"开始配对 %@ (配对码 %@)", baseURL, code];
     NSDictionary *hello = [self httpGetJSON:[baseURL stringByAppendingString:@"/qc-sync/hello"] timeout:5.0];
     if (!hello) {
         NSLog(@"[QuickClipboard] Pair failed: %@ unreachable", baseURL);
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"GET /qc-sync/hello 失败: %@ 不可达或超时", baseURL];
         return NO;
     }
     NSString *remoteId = hello[@"device_id"];
@@ -1252,12 +1299,16 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSString *remoteProtocol = hello[@"protocol"];
     if (![remoteProtocol isEqualToString:kHTTPProtocol]) {
         NSLog(@"[QuickClipboard] Pair failed: %@ is not a compatible QuickClipboard service", baseURL);
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"协议不匹配: %@ 返回 protocol=%@ (期望 %@)",
+         baseURL, remoteProtocol ?: @"空", kHTTPProtocol];
         return NO;
     }
     if ([remoteId isEqualToString:[self deviceId]]) {
         NSLog(@"[QuickClipboard] Pair failed: cannot pair with self");
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"拒绝配对自身设备 (%@)", remoteId];
         return NO;
     }
+    [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"hello 成功: 目标 %@ (device_id=%@)", remoteName, remoteId];
 
     // Step 2: POST /qc-sync/pairing/confirm
     NSDictionary *payload = @{
@@ -1269,13 +1320,16 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSDictionary *confirm = [self httpPostJSON:baseURL path:@"/qc-sync/pairing/confirm" body:payload timeout:8.0];
     if (!confirm) {
         NSLog(@"[QuickClipboard] Pair failed: pairing/confirm error from %@", baseURL);
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"POST /qc-sync/pairing/confirm 失败: %@ 无响应或返回非JSON", baseURL];
         return NO;
     }
     NSString *peerToken = confirm[@"peer_token"];
     if (peerToken.length == 0) {
         NSLog(@"[QuickClipboard] Pair failed: no peer_token in response: %@", confirm);
+        [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"确认响应缺少 peer_token: %@", confirm];
         return NO;
     }
+    [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"配对确认成功, 已获得 peer_token"];
 
     // Step 3: 保存 peer
     QCLANPeer *peer = [[QCLANPeer alloc] init];
@@ -1299,6 +1353,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     });
 
     NSLog(@"[QuickClipboard] Paired with %@ (%@ via %@, token=%@)", remoteName, remoteId, baseURL, peerToken);
+    [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"配对完成并已保存: %@ (%@)", remoteName, baseURL];
     return YES;
 }
 
@@ -1314,16 +1369,24 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
     __block NSDictionary *result = nil;
+    __block NSError *capturedError = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (data && !err) {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if ([json isKindOfClass:[NSDictionary class]]) result = json;
+            else capturedError = [NSError errorWithDomain:@"QCLANHTTP" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"响应不是JSON"}];
+        } else if (err) {
+            capturedError = err;
         }
         dispatch_semaphore_signal(sem);
     }] resume];
 
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((timeout + 1) * NSEC_PER_SEC)));
+    if (capturedError) {
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"GET %@ 失败: %@ (code=%ld)",
+         urlString, capturedError.localizedDescription ?: @"?", (long)capturedError.code];
+    }
     return result;
 }
 
@@ -1341,16 +1404,24 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
     __block NSDictionary *result = nil;
+    __block NSError *capturedError = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         if (data && !err) {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if ([json isKindOfClass:[NSDictionary class]]) result = json;
+            else capturedError = [NSError errorWithDomain:@"QCLANHTTP" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"响应不是JSON"}];
+        } else if (err) {
+            capturedError = err;
         }
         dispatch_semaphore_signal(sem);
     }] resume];
 
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((timeout + 1) * NSEC_PER_SEC)));
+    if (capturedError) {
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"POST %@%@ 失败: %@ (code=%ld)",
+         baseURL, path, capturedError.localizedDescription ?: @"?", (long)capturedError.code];
+    }
     return result;
 }
 
@@ -1383,6 +1454,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [_peers removeObject:found];
         [self savePeers];
         NSLog(@"[QuickClipboard] Removed peer: %@", deviceId);
+        [[QCLANLogger sharedLogger] info:@"UI" fmt:@"已移除已配对设备: %@", deviceId];
+    } else {
+        [[QCLANLogger sharedLogger] warn:@"UI" fmt:@"移除设备失败: 未找到 %@", deviceId];
     }
 }
 
@@ -1436,10 +1510,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 // NSNetServiceDelegate
 - (void)netServiceDidPublish:(NSNetService *)sender {
     NSLog(@"[QuickClipboard] Bonjour published: %@", sender.name);
+    [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"Bonjour 发布成功: %@._quickclipboard._tcp", sender.name];
 }
 
 - (void)netService:(NSNetService *)sender didNotPublish:(NSDictionary<NSString *, NSNumber *> *)errorDict {
     NSLog(@"[QuickClipboard] Bonjour publish failed: %@", errorDict);
+    [[QCLANLogger sharedLogger] warn:@"SYS" fmt:@"Bonjour 发布失败: %@", errorDict];
 }
 
 
@@ -1479,7 +1555,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 #pragma mark - Sync Operations (走桌面端 /qc-sync/records/history + Bearer 授权)
 
 - (void)broadcastChange {
-    for (QCLANPeer *peer in [_peers copy]) {
+    NSArray *peers = [_peers copy];
+    if (peers.count > 0) {
+        [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"剪贴板变化, 自动推送到 %lu 台已配对设备", (unsigned long)peers.count];
+    }
+    for (QCLANPeer *peer in peers) {
         [self pushToPeer:peer completion:nil];
     }
 }
@@ -1487,6 +1567,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 - (void)pushToPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
     if (!peer.peerToken.length || !peer.baseURL.length) {
         NSLog(@"[QuickClipboard] Push skipped: peer %@ not paired", peer.deviceId);
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"推送跳过: %@ 未配对", peer.deviceId];
         if (completion) completion(NO, @"设备未配对");
         return;
     }
@@ -1509,6 +1590,8 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     req.timeoutInterval = 30.0;
 
     NSLog(@"[QuickClipboard] Pushing %lu records to %@ (%@)", (unsigned long)records.count, peer.deviceId, peer.baseURL);
+    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送 %lu 条记录到 %@ (%@)",
+     (unsigned long)records.count, peer.name ?: peer.deviceId, peer.baseURL];
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.connectionProxyDictionary = @{};
@@ -1516,7 +1599,14 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         BOOL ok = [(NSHTTPURLResponse *)response statusCode] == 200;
-        if (!ok) NSLog(@"[QuickClipboard] Push to %@ failed: %@", peer.deviceId, error.localizedDescription ?: @"non-200");
+        if (!ok) {
+            NSLog(@"[QuickClipboard] Push to %@ failed: %@", peer.deviceId, error.localizedDescription ?: @"non-200");
+            NSInteger code = [(NSHTTPURLResponse *)response statusCode];
+            [[QCLANLogger sharedLogger] error:@"SYNC" fmt:@"推送到 %@ 失败: %@ (HTTP %ld)",
+             peer.baseURL, error.localizedDescription ?: @"非200响应", (long)code];
+        } else {
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送成功: %@", peer.baseURL];
+        }
         if (completion) completion(ok, ok ? @"已推送" : (error.localizedDescription ?: @"推送失败"));
     }] resume];
 }
@@ -1524,6 +1614,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 - (void)pullFromPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
     if (!peer.peerToken.length || !peer.baseURL.length) {
         NSLog(@"[QuickClipboard] Pull skipped: peer %@ not paired", peer.deviceId);
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"拉取跳过: %@ 未配对", peer.deviceId];
         if (completion) completion(NO, @"设备未配对");
         return;
     }
@@ -1539,10 +1630,14 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
     NSLog(@"[QuickClipboard] Pulling from %@ (%@)", peer.deviceId, peer.baseURL);
+    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"从 %@ 拉取记录 (%@)",
+     peer.name ?: peer.deviceId, peer.baseURL];
 
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (!data) {
             NSLog(@"[QuickClipboard] Pull from %@ failed: %@", peer.deviceId, error.localizedDescription);
+            [[QCLANLogger sharedLogger] error:@"SYNC" fmt:@"从 %@ 拉取失败: %@",
+             peer.baseURL, error.localizedDescription ?: @"无数据"];
             if (completion) completion(NO, error.localizedDescription ?: @"拉取失败");
             return;
         }
@@ -1564,6 +1659,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
             }
         }
+        [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取完成: 新增 %lu 条", (unsigned long)count];
         if (completion) completion(YES, [NSString stringWithFormat:@"拉取 %lu 条", (unsigned long)count]);
     }] resume];
 }

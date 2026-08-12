@@ -1,5 +1,7 @@
 #import "QCLANController.h"
 #import "QCLANServer.h"
+#import "QCLANLogger.h"
+#import "QCLANLogViewController.h"
 #import "QCStore.h"
 #import <objc/runtime.h>
 #import <ifaddrs.h>
@@ -154,12 +156,15 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 @property (nonatomic, strong) QCLANStatusPill *dataPill;
 @property (nonatomic, strong) UILabel *codeLabel;
 @property (nonatomic, strong) UILabel *endpointLabel;
+@property (nonatomic, strong) UIButton *logButton;   // 右上角感叹号 → 日志面板
 @end
 
 @implementation QCLANController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"打开局域网设置页 (v%@)", QC_VERSION];
 
     self.defaults = [NSUserDefaults standardUserDefaults];
     self.pairedDevices = [NSMutableArray array];
@@ -186,7 +191,45 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.scrollView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     [self.view addSubview:self.scrollView];
 
+    [self setupLogButton];
     [self buildUI];
+}
+
+#pragma mark - 右上角感叹号日志按钮
+
+- (void)setupLogButton {
+    self.logButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    UIImage *icon = [UIImage systemImageNamed:@"exclamationmark.circle.fill"];
+    if (icon) {
+        [self.logButton setImage:icon forState:UIControlStateNormal];
+    } else {
+        [self.logButton setTitle:@"!" forState:UIControlStateNormal];
+        self.logButton.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+    }
+    self.logButton.tintColor = [UIColor whiteColor];
+    self.logButton.backgroundColor = [UIColor systemOrangeColor];
+    self.logButton.layer.cornerRadius = 19;
+    self.logButton.layer.masksToBounds = YES;
+    self.logButton.accessibilityLabel = @"查看局域网日志";
+    [self.logButton addTarget:self action:@selector(openLogPanel) forControlEvents:UIControlEventTouchUpInside];
+    self.logButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.logButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.logButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-14],
+        [self.logButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
+        [self.logButton.widthAnchor constraintEqualToConstant:38],
+        [self.logButton.heightAnchor constraintEqualToConstant:38],
+    ]];
+    [self.view bringSubviewToFront:self.logButton];
+}
+
+- (void)openLogPanel {
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户打开日志面板 (v%@)", QC_VERSION];
+    QCLANLogViewController *logVC = [[QCLANLogViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logVC];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -199,7 +242,11 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 
 - (void)loadPeersFromServer {
     [self apiGet:@"/peers" completion:^(NSDictionary *json, NSError *error) {
-        if (error || !json) return;
+        if (error || !json) {
+            [[QCLANLogger sharedLogger] error:@"UI" fmt:@"获取已配对设备列表失败: %@",
+             error.localizedDescription ?: @"无响应"];
+            return;
+        }
         NSArray *peersArr = json[@"peers"];
         if (![peersArr isKindOfClass:[NSArray class]]) return;
 
@@ -234,6 +281,8 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
             }
         } else {
             self.httpRunning = NO;
+            [[QCLANLogger sharedLogger] error:@"UI" fmt:@"本地服务 /ping 无响应: %@",
+             error.localizedDescription ?: @"未知错误 (SpringBoard 端服务可能未启动)"];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (self.httpPill) {
@@ -247,9 +296,20 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.isScanning = YES;
     self.discoveredDevices = @[];
     [self buildUI]; // show scanning button state
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击: 扫描局域网"];
 
     [self apiGet:@"/scan" completion:^(NSDictionary *json, NSError *error) {
         self.isScanning = NO;
+
+        if (error || !json) {
+            [[QCLANLogger sharedLogger] error:@"SCAN" fmt:@"扫描请求失败: %@",
+             error.localizedDescription ?: @"无响应"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self buildUI];
+                [self showAlert:@"扫描失败" message:error.localizedDescription ?: @"无法连接本地扫描服务"];
+            });
+            return;
+        }
 
         NSMutableArray *devices = [NSMutableArray array];
         NSArray *devicesArr = json[@"devices"];
@@ -272,8 +332,16 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
         dispatch_async(dispatch_get_main_queue(), ^{
             [self buildUI];
             if (devices.count == 0) {
+                [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"扫描完成: 未发现设备 (共3秒, 2轮广播)"];
                 [self showAlert:@"扫描完成"
                         message:@"未发现局域网设备。请确认：\n\n1. 电脑端 QuickClipboard 已开启局域网同步服务\n2. 手机和电脑在同一局域网\n3. 防火墙未阻止 UDP 35692 / TCP 35691 端口\n\n提示：也可手动输入电脑 IP + 配对码进行配对"];
+            } else {
+                NSMutableString *names = [NSMutableString string];
+                for (QCLANPeer *p in devices) {
+                    [names appendFormat:@"%@(%@) ", p.name ?: @"?", p.address ?: @"?"];
+                }
+                [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"扫描完成: 发现 %lu 台 -> %@",
+                 (unsigned long)devices.count, names];
             }
         });
     }];
@@ -281,6 +349,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 
 - (void)performPairWithAddress:(NSString *)addr code:(NSString *)code {
     NSDictionary *body = @{@"address": addr, @"code": code, @"port": @(35691)};
+    [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"发起配对: %@ 码=%@", addr, code];
 
     [self apiPost:@"/pair" body:body completion:^(NSDictionary *json, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -288,9 +357,11 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
                 self.peerUrlField.text = @"";
                 self.peerCodeField.text = @"";
                 [self loadPeersFromServer];
+                [[QCLANLogger sharedLogger] info:@"PAIR" fmt:@"配对成功: %@", addr];
                 [self showAlert:@"配对成功" message:@"设备已成功配对"];
             } else {
                 NSString *msg = json[@"error"] ?: @"配对失败，请检查配对码是否正确";
+                [[QCLANLogger sharedLogger] error:@"PAIR" fmt:@"配对失败 %@: %@", addr, msg];
                 [self showAlert:@"配对失败" message:msg];
             }
         });
@@ -302,6 +373,12 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     NSString *path = [NSString stringWithFormat:@"/peers/%@", encoded];
 
     [self apiDelete:path completion:^(NSDictionary *json, NSError *error) {
+        if (error || !json) {
+            [[QCLANLogger sharedLogger] error:@"UI" fmt:@"删除设备请求失败: %@",
+             error.localizedDescription ?: @"无响应"];
+        } else {
+            [[QCLANLogger sharedLogger] info:@"UI" fmt:@"已删除设备: %@", deviceId];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             [self loadPeersFromServer];
         });
@@ -970,22 +1047,28 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.httpRunning = sender.on;
     [self.defaults setBool:self.httpRunning forKey:@"lanReceiveEnabled"];
     [self.defaults synchronize];
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换服务开关 -> %@", sender.on ? @"开" : @"关"];
     [self buildUI];
 }
 
 - (void)togglePairCodeVisibility {
     self.pairCodeVisible = !self.pairCodeVisible;
     self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"%s配对码", self.pairCodeVisible ? "显示" : "隐藏"];
 }
 
 - (void)refreshPairingCode {
     // 由服务端刷新 (重置 TTL 与尝试次数, 与桌面端行为一致)
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击: 刷新配对码"];
     [self apiPost:@"/pair-code" body:@{} completion:^(NSDictionary *json, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (json[@"code"]) {
                 self.pairingCode = json[@"code"];
                 self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
+                [[QCLANLogger sharedLogger] info:@"UI" fmt:@"配对码已刷新: %@", self.pairingCode];
             } else {
+                [[QCLANLogger sharedLogger] error:@"UI" fmt:@"刷新配对码失败: %@",
+                 error.localizedDescription ?: @"本地服务无响应"];
                 [self showAlert:@"刷新失败" message:@"无法连接本地服务，请稍后重试"];
             }
         });
@@ -1002,6 +1085,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     NSString *code = [self.peerCodeField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 
     if (addr.length == 0 || code.length == 0) {
+        [[QCLANLogger sharedLogger] warn:@"UI" fmt:@"手动配对: 地址或配对码为空"];
         [self showAlert:@"错误" message:@"请填写设备 IP 地址和配对码"];
         return;
     }
@@ -1009,6 +1093,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     [self.peerUrlField resignFirstResponder];
     [self.peerCodeField resignFirstResponder];
 
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户手动配对: %@", addr];
     [self performPairWithAddress:addr code:code];
 }
 
@@ -1018,7 +1103,12 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     for (QCLANPeer *p in self.discoveredDevices) {
         if ([p.deviceId isEqualToString:deviceId]) { peer = p; break; }
     }
-    if (!peer) return;
+    if (!peer) {
+        [[QCLANLogger sharedLogger] warn:@"UI" fmt:@"快速配对: 未找到发现设备 %@", deviceId];
+        return;
+    }
+
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击快速配对: %@ (%@)", peer.name, peer.address];
 
     // 桌面端协议: 发现包不含配对码, 需用户在对方设备上查看后手动输入
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"输入配对码"
@@ -1043,8 +1133,12 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 - (void)pushToDevice:(UIButton *)sender {
     NSString *deviceId = sender.deviceId;
     QCLANPeer *peer = [self findPeerByDeviceId:deviceId];
-    if (!peer) return;
+    if (!peer) {
+        [[QCLANLogger sharedLogger] warn:@"UI" fmt:@"推送: 未找到设备 %@", deviceId];
+        return;
+    }
 
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击推送: %@ (%@)", peer.name, peer.baseURL];
     [[QCLANServer sharedServer] pushToPeer:peer completion:^(BOOL success, NSString *message) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self showAlert:success ? @"推送完成" : @"推送失败" message:message];
@@ -1060,6 +1154,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     if (!peer) return;
 
     NSString *deviceName = peer.name ?: @"此设备";
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户点击删除设备: %@", deviceName];
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"确认移除"
                                                                    message:[NSString stringWithFormat:@"确定要移除 %@ 吗？", deviceName]
@@ -1075,12 +1170,14 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.sendEnabled = sender.on;
     [self.defaults setBool:self.sendEnabled forKey:@"lanSendEnabled"];
     [self.defaults synchronize];
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换自动推送 -> %@", sender.on ? @"开" : @"关"];
 }
 
 - (void)receiveToggled:(UISwitch *)sender {
     self.receiveEnabled = sender.on;
     [self.defaults setBool:self.receiveEnabled forKey:@"lanReceiveEnabled"];
     [self.defaults synchronize];
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换自动拉取 -> %@", sender.on ? @"开" : @"关"];
     [self buildUI];
 }
 
@@ -1088,6 +1185,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.notifyEnabled = sender.on;
     [self.defaults setBool:self.notifyEnabled forKey:@"lanSyncNotifyEnabled"];
     [self.defaults synchronize];
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"切换同步通知 -> %@", sender.on ? @"开" : @"关"];
 }
 
 
