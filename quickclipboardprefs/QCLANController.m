@@ -13,9 +13,9 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 #pragma mark - UIButton Category
 
 @implementation UIButton (QCLANPeerID)
-static const void *kPeerIdKey = &kPeerIdKey;
-- (NSString *)peerId { return objc_getAssociatedObject(self, kPeerIdKey); }
-- (void)setPeerId:(NSString *)peerId { objc_setAssociatedObject(self, kPeerIdKey, peerId, OBJC_ASSOCIATION_COPY_NONATOMIC); }
+static const void *kDeviceIdKey = &kDeviceIdKey;
+- (NSString *)deviceId { return objc_getAssociatedObject(self, kDeviceIdKey); }
+- (void)setDeviceId:(NSString *)deviceId { objc_setAssociatedObject(self, kDeviceIdKey, deviceId, OBJC_ASSOCIATION_COPY_NONATOMIC); }
 @end
 
 
@@ -206,13 +206,15 @@ static const void *kPeerIdKey = &kPeerIdKey;
         [self.pairedDevices removeAllObjects];
         for (NSDictionary *dict in peersArr) {
             QCLANPeer *peer = [[QCLANPeer alloc] init];
-            peer.name     = dict[@"name"]     ?: @"Unknown";
-            peer.address  = dict[@"address"]  ?: @"";
-            peer.port     = [dict[@"port"] unsignedShortValue];
-            peer.pairCode = dict[@"pairCode"] ?: @"";
-            peer.peerId   = dict[@"peerId"]   ?: @"";
-            peer.paired   = [dict[@"paired"] boolValue];
-            peer.lastSeen = [NSDate dateWithTimeIntervalSince1970:[dict[@"lastSeen"] doubleValue]];
+            peer.name      = dict[@"device_name"] ?: dict[@"name"] ?: @"Unknown";
+            peer.address   = dict[@"address"]  ?: @"";
+            peer.port      = [dict[@"port"] unsignedShortValue];
+            peer.pairCode  = dict[@"pairCode"] ?: @"";
+            peer.deviceId  = dict[@"device_id"] ?: dict[@"deviceId"] ?: @"";
+            peer.baseURL   = dict[@"base_url"] ?: @"";
+            peer.peerToken = dict[@"peer_token"] ?: @"";
+            peer.paired    = [dict[@"paired"] boolValue];
+            peer.lastSeen  = [NSDate dateWithTimeIntervalSince1970:[dict[@"lastSeen"] doubleValue]];
             if (peer.paired) [self.pairedDevices addObject:peer];
         }
 
@@ -254,12 +256,14 @@ static const void *kPeerIdKey = &kPeerIdKey;
         if ([devicesArr isKindOfClass:[NSArray class]]) {
             for (NSDictionary *dict in devicesArr) {
                 QCLANPeer *peer = [[QCLANPeer alloc] init];
-                peer.name     = dict[@"name"]     ?: @"Unknown";
-                peer.address  = dict[@"address"]  ?: @"";
-                peer.port     = [dict[@"port"] unsignedShortValue];
-                peer.pairCode = dict[@"pairCode"] ?: @"";
-                peer.peerId   = dict[@"peerId"]   ?: @"";
-                peer.paired   = [dict[@"paired"] boolValue];
+                peer.name      = dict[@"device_name"] ?: dict[@"name"] ?: @"Unknown";
+                peer.address   = dict[@"address"]  ?: @"";
+                peer.port      = [dict[@"port"] unsignedShortValue];
+                peer.pairCode  = dict[@"pairCode"] ?: @"";
+                peer.deviceId  = dict[@"device_id"] ?: dict[@"deviceId"] ?: @"";
+                peer.baseURL   = dict[@"base_url"] ?: @"";
+                peer.peerToken = dict[@"peer_token"] ?: @"";
+                peer.paired    = [dict[@"paired"] boolValue];
                 [devices addObject:peer];
             }
         }
@@ -269,7 +273,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
             [self buildUI];
             if (devices.count == 0) {
                 [self showAlert:@"扫描完成"
-                        message:@"未发现局域网设备。请确认：\n\n1. 电脑端 QuickClipboard 已启动 HTTP 服务\n2. 手机和电脑在同一局域网\n3. 防火墙未阻止端口 35691/35693\n\n提示：可尝试电脑端通过 Bonjour 发现本设备\n服务名: _quickclipboard._tcp"];
+                        message:@"未发现局域网设备。请确认：\n\n1. 电脑端 QuickClipboard 已开启局域网同步服务\n2. 手机和电脑在同一局域网\n3. 防火墙未阻止 UDP 35692 / TCP 35691 端口\n\n提示：也可手动输入电脑 IP + 配对码进行配对"];
             }
         });
     }];
@@ -293,8 +297,8 @@ static const void *kPeerIdKey = &kPeerIdKey;
     }];
 }
 
-- (void)performRemovePeer:(NSString *)peerId {
-    NSString *encoded = [peerId stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+- (void)performRemovePeer:(NSString *)deviceId {
+    NSString *encoded = [deviceId stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
     NSString *path = [NSString stringWithFormat:@"/peers/%@", encoded];
 
     [self apiDelete:path completion:^(NSDictionary *json, NSError *error) {
@@ -808,7 +812,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [row addSubview:nameLabel];
 
     UILabel *addrLabel = [[UILabel alloc] init];
-    addrLabel.text = [NSString stringWithFormat:@"%@:%hu  |  配对码: %@", peer.address, peer.port, peer.pairCode];
+    addrLabel.text = [NSString stringWithFormat:@"%@:%hu", peer.address, peer.port];
     addrLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     addrLabel.textColor = [UIColor secondaryLabelColor];
     addrLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -834,7 +838,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
         [quickPairBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         quickPairBtn.layer.cornerRadius = 6;
         quickPairBtn.translatesAutoresizingMaskIntoConstraints = NO;
-        quickPairBtn.peerId = peer.peerId;
+        quickPairBtn.deviceId = peer.deviceId;
         [quickPairBtn addTarget:self action:@selector(quickPairDiscovered:) forControlEvents:UIControlEventTouchUpInside];
         [row addSubview:quickPairBtn];
 
@@ -911,7 +915,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [pushBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     pushBtn.layer.cornerRadius = 6;
     pushBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    pushBtn.peerId = peer.peerId;
+    pushBtn.deviceId = peer.deviceId;
     [pushBtn addTarget:self action:@selector(pushToDevice:) forControlEvents:UIControlEventTouchUpInside];
     [row addSubview:pushBtn];
 
@@ -922,7 +926,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
     [delBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     delBtn.layer.cornerRadius = 6;
     delBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    delBtn.peerId = peer.peerId;
+    delBtn.deviceId = peer.deviceId;
     [delBtn addTarget:self action:@selector(removeDevice:) forControlEvents:UIControlEventTouchUpInside];
     [row addSubview:delBtn];
 
@@ -975,11 +979,17 @@ static const void *kPeerIdKey = &kPeerIdKey;
 }
 
 - (void)refreshPairingCode {
-    uint32_t code = arc4random_uniform(900000) + 100000;
-    self.pairingCode = [NSString stringWithFormat:@"%06u", code];
-    self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
-    [self.defaults setObject:self.pairingCode forKey:@"lanPairingCode"];
-    [self.defaults synchronize];
+    // 由服务端刷新 (重置 TTL 与尝试次数, 与桌面端行为一致)
+    [self apiPost:@"/pair-code" body:@{} completion:^(NSDictionary *json, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (json[@"code"]) {
+                self.pairingCode = json[@"code"];
+                self.codeLabel.text = self.pairCodeVisible ? self.pairingCode : @"\u2022\u2022\u2022\u2022\u2022\u2022";
+            } else {
+                [self showAlert:@"刷新失败" message:@"无法连接本地服务，请稍后重试"];
+            }
+        });
+    }];
 }
 
 - (void)scanLan {
@@ -1003,27 +1013,36 @@ static const void *kPeerIdKey = &kPeerIdKey;
 }
 
 - (void)quickPairDiscovered:(UIButton *)sender {
-    NSString *peerId = sender.peerId;
+    NSString *deviceId = sender.deviceId;
     QCLANPeer *peer = nil;
     for (QCLANPeer *p in self.discoveredDevices) {
-        if ([p.peerId isEqualToString:peerId]) { peer = p; break; }
+        if ([p.deviceId isEqualToString:deviceId]) { peer = p; break; }
     }
     if (!peer) return;
 
-    // Ask for verification since we already have the code
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"确认配对"
-                                                                   message:[NSString stringWithFormat:@"与 %@ (%@) 配对？\n配对码: %@", peer.name, peer.address, peer.pairCode]
+    // 桌面端协议: 发现包不含配对码, 需用户在对方设备上查看后手动输入
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"输入配对码"
+                                                                   message:[NSString stringWithFormat:@"与 %@ (%@) 配对\n请在对方设备上查看配对码并输入", peer.name, peer.address]
                                                             preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"6 位配对码";
+        tf.keyboardType = UIKeyboardTypeNumberPad;
+    }];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"配对" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self performPairWithAddress:peer.address code:peer.pairCode];
+        NSString *code = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (code.length == 0) {
+            [self showAlert:@"错误" message:@"请输入配对码"];
+            return;
+        }
+        [self performPairWithAddress:peer.address code:code];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)pushToDevice:(UIButton *)sender {
-    NSString *peerId = sender.peerId;
-    QCLANPeer *peer = [self findPeerById:peerId];
+    NSString *deviceId = sender.deviceId;
+    QCLANPeer *peer = [self findPeerByDeviceId:deviceId];
     if (!peer) return;
 
     [[QCLANServer sharedServer] pushToPeer:peer completion:^(BOOL success, NSString *message) {
@@ -1034,10 +1053,10 @@ static const void *kPeerIdKey = &kPeerIdKey;
 }
 
 - (void)removeDevice:(UIButton *)sender {
-    NSString *peerId = sender.peerId;
-    if (!peerId) return;
+    NSString *deviceId = sender.deviceId;
+    if (!deviceId) return;
 
-    QCLANPeer *peer = [self findPeerById:peerId];
+    QCLANPeer *peer = [self findPeerByDeviceId:deviceId];
     if (!peer) return;
 
     NSString *deviceName = peer.name ?: @"此设备";
@@ -1047,7 +1066,7 @@ static const void *kPeerIdKey = &kPeerIdKey;
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"移除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [self performRemovePeer:peerId];
+        [self performRemovePeer:deviceId];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -1096,9 +1115,15 @@ static const void *kPeerIdKey = &kPeerIdKey;
     return items ? items.count : 0;
 }
 
-- (QCLANPeer *)findPeerById:(NSString *)peerId {
+- (QCLANPeer *)findPeerByDeviceId:(NSString *)deviceId {
+    if (!deviceId.length) return nil;
+    // 优先取共享服务实例中的完整 peer (含 peer_token, 从 peers.plist 加载)
+    for (QCLANPeer *p in [[QCLANServer sharedServer] pairedDevices]) {
+        if ([p.deviceId isEqualToString:deviceId]) return p;
+    }
+    // 回退到 HTTP 列表 (仅展示用, 不含 token)
     for (QCLANPeer *p in self.pairedDevices) {
-        if ([p.peerId isEqualToString:peerId]) return p;
+        if ([p.deviceId isEqualToString:deviceId]) return p;
     }
     return nil;
 }
