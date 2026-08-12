@@ -1,5 +1,5 @@
 #import <UIKit/UIKit.h>
-#import <UserNotifications/UserNotifications.h>
+#import <objc/message.h>
 #import <unistd.h>
 #import "QuickClipboard.h"
 #import "QCClipManager.h"
@@ -122,20 +122,30 @@ static BOOL QCShouldCapturePasteboard(UIPasteboard *pb) {
 
 %end
 
-// v1.3.10: UNUserNotificationCenter delegate —— 让 SpringBoard 在前台也弹横幅
-// (iOS 10+ 前台本地通知默认不展示, 需要 delegate willPresent 返回 banner)。
-@interface QCNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
+// v1.3.10: UNUserNotificationCenter delegate —— 让 SpringBoard 在前台也弹横幅。
+// 注意: Theos SDK 环境下 UserNotifications 头文件方法查找异常,
+// 全部用 runtime (NSClassFromString + objc_msgSend) 调用, 无编译期依赖。
+// 类与协议方法名与系统一致, 运行时消息派发不受影响。
+@interface QCNotificationDelegate : NSObject
+- (void)userNotificationCenter:(id)center willPresentNotification:(id)notification withCompletionHandler:(void (^)(NSUInteger))completionHandler;
 @end
 
 @implementation QCNotificationDelegate
-- (void)userNotificationCenter:(UNUserNotificationCenter *)center
-       willPresentNotification:(UNNotification *)notification
-         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
-    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+- (void)userNotificationCenter:(id)center willPresentNotification:(id)notification withCompletionHandler:(void (^)(NSUInteger))completionHandler {
+    if (completionHandler) {
+        // UNNotificationPresentationOptionSound(1) | OptionBanner(2)
+        completionHandler(1 | 2);
+    }
 }
 @end
 
 static QCNotificationDelegate *QCNotifDelegate = nil;
+
+static id QCUNCenter(void) {
+    Class cls = NSClassFromString(@"UNUserNotificationCenter");
+    if (!cls) return nil;
+    return [cls performSelector:@selector(currentCenter)];
+}
 
 %ctor {
     @autoreleasepool {
@@ -147,9 +157,12 @@ static QCNotificationDelegate *QCNotifDelegate = nil;
         // v1.3.10: SpringBoard 进程设置通知 delegate, 保证前台也弹横幅
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if ([bundleID isEqualToString:@"com.apple.springboard"]) {
-            QCNotifDelegate = [[QCNotificationDelegate alloc] init];
-            [[UNUserNotificationCenter currentCenter] setDelegate:QCNotifDelegate];
-            NSLog(@"[QuickClipboard] UNUserNotificationCenter delegate 已设置 (SpringBoard)");
+            id center = QCUNCenter();
+            if (center) {
+                QCNotifDelegate = [[QCNotificationDelegate alloc] init];
+                [center setDelegate:QCNotifDelegate];
+                NSLog(@"[QuickClipboard] UNUserNotificationCenter delegate 已设置 (SpringBoard)");
+            }
         }
         // v1.3.10: 剪贴板轮询兜底 —— 只在 SpringBoard 进程启动,
         // 不依赖 hook 也能发现剪贴板变化 (微信等 App 的复制 hook 抓不到时兜底)。

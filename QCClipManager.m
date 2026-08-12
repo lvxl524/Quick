@@ -3,7 +3,7 @@
 #import "QCWebDAVClient.h"
 #import "QCLANServer.h"
 #import "QCLANLogger.h"
-#import <UserNotifications/UserNotifications.h>
+#import <objc/message.h>
 
 static const NSTimeInterval kDeduplicateWindow = 2.0;
 
@@ -251,39 +251,67 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 // v1.3.10: 真正的系统横幅通知 (UNUserNotificationCenter)。
 // 旧版用 UILocalNotification/presentLocalNotificationNow, 在 iOS 10+ 已废弃
 // 且不显示任何横幅 → 用户开了"同步通知"开关却毫无效果。
+// 注意: Theos SDK 环境下 UserNotifications 头文件方法查找异常,
+// 全部用 runtime (NSClassFromString + objc_msgSend) 调用, 无编译期依赖。
+static id QCUNCenter(void) {
+    Class cls = NSClassFromString(@"UNUserNotificationCenter");
+    if (!cls) return nil;
+    return [cls performSelector:@selector(currentCenter)];
+}
+
 - (void)handleLANSyncReceived:(NSNotification *)note {
     NSInteger count = [note.userInfo[@"count"] integerValue];
-    UNUserNotificationCenter *center = [UNUserNotificationCenter currentCenter];
-    [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
-        if (settings.authorizationStatus == UNAuthorizationStatusNotDetermined) {
+    id center = QCUNCenter();
+    if (!center) {
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"系统不支持本地通知, 无法弹横幅"];
+        return;
+    }
+    [center getNotificationSettingsWithCompletionHandler:^(id settings) {
+        // UNAuthorizationStatus: NotDetermined=0 Denied=1 Authorized=2 Provisional=3
+        NSInteger status = [settings respondsToSelector:@selector(authorizationStatus)]
+            ? (NSInteger)[settings authorizationStatus] : -1;
+        if (status == 0) {
             // 首次请求通知权限 (系统弹窗, 用户允许后显示横幅)
-            [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+            [center requestAuthorizationWithOptions:(1 | 2 | 4)  // Alert|Sound|Badge
                                   completionHandler:^(BOOL granted, NSError *error) {
                 if (granted) {
                     [self postReceivedLocalNotificationWithCount:count];
                 } else {
-                    [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限被拒绝, 无法弹横幅提示 (%@)", error ? error.localizedDescription : @"用户拒绝"];
+                    [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限被拒绝, 无法弹横幅提示 (%@)",
+                     error ? error.localizedDescription : @"用户拒绝"];
                 }
             }];
-        } else if (settings.authorizationStatus == UNAuthorizationStatusAuthorized ||
-                   settings.authorizationStatus == UNAuthorizationStatusProvisional) {
+        } else if (status == 2 || status == 3) {
             [self postReceivedLocalNotificationWithCount:count];
         } else {
-            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限未开启, 无法弹横幅提示 (状态 %ld)", (long)settings.authorizationStatus];
+            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限未开启, 无法弹横幅提示 (状态 %ld)", (long)status];
         }
     }];
 }
 
 - (void)postReceivedLocalNotificationWithCount:(NSInteger)count {
-    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
-    content.title = @"QuickClipboard";
-    content.body = [NSString stringWithFormat:@"已收到 %ld 条剪贴板同步内容, 已写入剪贴板可直接粘贴", (long)count];
-    content.sound = [UNNotificationSound defaultSound];
-    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:[NSUUID UUID].UUIDString
-                                                                          content:content
-                                                                          trigger:nil];
-    [[UNUserNotificationCenter currentCenter] addNotificationRequest:request
-                                               withCompletionHandler:^(NSError *error) {
+    id center = QCUNCenter();
+    if (!center) return;
+    Class contentClass = NSClassFromString(@"UNMutableNotificationContent");
+    Class reqClass = NSClassFromString(@"UNNotificationRequest");
+    Class soundClass = NSClassFromString(@"UNNotificationSound");
+    if (!contentClass || !reqClass || !soundClass) return;
+
+    id content = [[contentClass alloc] init];
+    [content setValue:@"QuickClipboard" forKey:@"title"];
+    [content setValue:[NSString stringWithFormat:@"已收到 %ld 条剪贴板同步内容, 已写入剪贴板可直接粘贴", (long)count]
+               forKey:@"body"];
+    id defaultSound = [soundClass performSelector:@selector(defaultSound)];
+    if (defaultSound) [content setValue:defaultSound forKey:@"sound"];
+
+    // [UNNotificationRequest requestWithIdentifier:content:trigger:] 类方法 (3 参数), 用 objc_msgSend
+    id (*msgSend3)(id, SEL, id, id, id) = (id (*)(id, SEL, id, id, id))objc_msgSend;
+    id request = msgSend3(reqClass,
+                          NSSelectorFromString(@"requestWithIdentifier:content:trigger:"),
+                          [[NSUUID UUID] UUIDString], content, nil);
+    if (!request) return;
+
+    [center addNotificationRequest:request withCompletionHandler:^(NSError *error) {
         if (error) {
             [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"发送系统通知失败: %@", error.localizedDescription];
         } else {
