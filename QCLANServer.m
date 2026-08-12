@@ -911,7 +911,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSDictionary *batch = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
     NSArray *records = [batch isKindOfClass:[NSDictionary class]] ? batch[@"records"] : nil;
     NSMutableArray *changed = [NSMutableArray array];
-    QCClipItem *latestItem = nil;
+    QCClipItem *latestItem = nil;   // 本次批次中"变更记录"里 updatedAt 最新的一条
     if ([records isKindOfClass:[NSArray class]]) {
         for (NSDictionary *dict in records) {
             if (![dict isKindOfClass:[NSDictionary class]]) continue;
@@ -924,12 +924,18 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                     item.favorite = existing.favorite;
                     [[QCStore sharedStore] saveItem:item];
                     [changed addObject:[self cloudRecordFromItem:item]];
-                    latestItem = item;
+                    // v1.3.15: 按 updatedAt 取最新 (与拉取通道对称), 不再依赖推送数组顺序
+                    if (!latestItem || [item.updatedAt compare:latestItem.updatedAt] == NSOrderedDescending) {
+                        latestItem = item;
+                    }
                 }
             } else {
                 [[QCStore sharedStore] saveItem:item];
                 [changed addObject:[self cloudRecordFromItem:item]];
-                latestItem = item;
+                // v1.3.15: 按 updatedAt 取最新 (与拉取通道对称), 不再依赖推送数组顺序
+                if (!latestItem || [item.updatedAt compare:latestItem.updatedAt] == NSOrderedDescending) {
+                    latestItem = item;
+                }
             }
         }
         if (changed.count > 0) {
@@ -944,11 +950,16 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             }
             // 关键修复: 收到的记录写入系统剪贴板, 用户可直接粘贴 (电脑端复制 → 手机端剪贴板)
             // v1.3.8: suppressBroadcast=YES 防止写入剪贴板同步触发 hook, 避免把刚收到的内容立刻推回电脑
-            if (latestItem) {
+            // v1.3.15: 新鲜度门槛 —— 仅当最新一条确实是"刚复制"的内容(updatedAt 距今 <= 60 秒)
+            //         才写回系统剪贴板; 首次配对/全量同步推来的历史记录不写回, 避免顶掉用户当前剪贴板。
+            if (latestItem && [self shouldWriteBackToPasteboard:latestItem]) {
                 [[QCClipManager sharedManager] writeItemToPasteboard:latestItem suppressBroadcast:YES];
                 NSString *preview = latestItem.textRepresentation;
                 if (preview.length > 40) preview = [preview substringToIndex:40];
                 [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把收到的内容写入剪贴板: %@", preview];
+            } else if (latestItem) {
+                [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"最新收到条目不是实时内容 (updatedAt 距今 %.0f 秒), 跳过写回剪贴板",
+                 -[latestItem.updatedAt timeIntervalSinceNow]];
             }
         }
     }
@@ -956,6 +967,14 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
      (unsigned long)records.count, (unsigned long)changed.count];
     if (statusCode) *statusCode = 200;
     return [self jsonResponse:@{@"collection": @"history", @"records": changed} statusCode:statusCode];
+}
+
+// v1.3.15: 写回剪贴板的新鲜度门槛 —— 仅"刚复制"的内容 (updatedAt 距今 <= 60 秒)
+// 才允许写回系统剪贴板。首次配对/重配对的全量同步会推来大量历史记录,
+// 若全部写回会把用户当前剪贴板顶成一条旧内容 (与拉取通道共用, 保持对称)。
+- (BOOL)shouldWriteBackToPasteboard:(QCClipItem *)item {
+    NSTimeInterval age = -[item.updatedAt timeIntervalSinceNow];
+    return age <= 60.0;
 }
 
 - (NSData *)handleReceiveFavorites:(NSData *)body statusCode:(NSInteger *)statusCode {
@@ -1959,11 +1978,15 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 }
                 // 关键修复: 拉取到的新增记录写入系统剪贴板, 用户可直接粘贴
                 // v1.3.8: suppressBroadcast=YES 避免把刚拉取的内容反向推回电脑
-                if (newestNewItem) {
+                // v1.3.15: 与接收通道共用新鲜度门槛, 全量拉取的历史不写回, 避免顶掉用户当前剪贴板
+                if (newestNewItem && [self shouldWriteBackToPasteboard:newestNewItem]) {
                     [[QCClipManager sharedManager] writeItemToPasteboard:newestNewItem suppressBroadcast:YES];
                     NSString *preview = newestNewItem.textRepresentation;
                     if (preview.length > 40) preview = [preview substringToIndex:40];
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把拉取内容写入剪贴板: %@", preview];
+                } else if (newestNewItem) {
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取到的最新内容不是实时内容 (updatedAt 距今 %.0f 秒), 跳过写回剪贴板",
+                     -[newestNewItem.updatedAt timeIntervalSinceNow]];
                 }
             }
         }
