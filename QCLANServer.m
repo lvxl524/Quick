@@ -412,7 +412,11 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             const char *bytes = data.bytes;
             for (NSUInteger i = 0; i + 4 <= data.length; i++) {
                 if (bytes[i] == '\r' && bytes[i+1] == '\n' && bytes[i+2] == '\r' && bytes[i+3] == '\n') {
-                    headerRange = NSMakeRange(i + 4, 0);
+                    // v1.3.14 修复: 之前 length 写死为 0, subdataWithRange: 返回空 data,
+                    // 当 header+body 同包到达(桌面端 POST 小 JSON 常一次写完)时,
+                    // 已读入 buffer 的 body 全部丢失 → 请求体解析失败 (电脑配对手机 403/400)。
+                    // 现在把 header 之后已读到的所有字节都作为"已读 body"保留。
+                    headerRange = NSMakeRange(i + 4, data.length - (i + 4));
                     break;
                 }
             }
@@ -1973,6 +1977,19 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 #pragma mark - 双向同步 (手机端"同步"按钮: 先推后拉, 把电脑端最新内容带回手机剪贴板)
 
 - (void)syncNowWithPeer:(QCLANPeer *)peer completion:(void (^)(BOOL success, NSString *message))completion {
+    // v1.3.14 修复: 手动同步与 broadcastChange/autoPullOnce 对称, 先重载磁盘最新配对信息。
+    // 设置页进程的内存 _peers 是各自进程的独立副本, 重新配对后不会自动刷新,
+    // 直接使用 UI 层传入的 peer 会带着过期 peer_token → 电脑端鉴权失败 (HTTP 403)。
+    // 日志证据: 同一目标 19:16:22 自动推送成功, 19:16:15/19:16:27 手动同步却 403。
+    [self loadPeers];
+    if (peer.deviceId.length > 0) {
+        for (QCLANPeer *fresh in _peers) {
+            if ([fresh.deviceId isEqualToString:peer.deviceId]) {
+                peer = fresh; // 用磁盘最新 peer (含最新 peer_token)
+                break;
+            }
+        }
+    }
     if (!peer.peerToken.length || !peer.baseURL.length) {
         [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"同步跳过: %@ 未配对", peer.deviceId];
         if (completion) completion(NO, @"设备未配对");

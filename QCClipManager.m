@@ -308,6 +308,14 @@ static id QCUNCenter(void) {
                      authHandler);
         } else if (status == 2 || status == 3) {
             [self postReceivedLocalNotificationWithCount:count];
+        } else if (status == -1) {
+            // v1.3.14 修复: 状态 -1 是"查询异常"而非"未授权" —— tweak 注入多进程时,
+            // 非主进程的 UNUserNotificationCenter 查询权限可能拿不到有效状态。
+            // 日志证据: 19:15:09 同路径成功弹过横幅 (用户已允许), 19:15:50/19:16:51 却报 -1。
+            // 此时不放弃, 直接尝试 addNotificationRequest, 由系统裁决: 有权限则弹出,
+            // 无权限则静默丢弃 (add 回调会记 error, 不会崩溃)。
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"通知权限状态查询异常(%ld), 直接尝试弹横幅", (long)status];
+            [self postReceivedLocalNotificationWithCount:count];
         } else {
             [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限未开启, 无法弹横幅提示 (状态 %ld)", (long)status];
         }
