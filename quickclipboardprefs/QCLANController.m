@@ -251,6 +251,9 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
         }
         self.peersLoadError = nil;
         self.peersLoadedOnce = YES;
+        // v1.3.13: 诊断日志 —— 服务端返回条数 vs 设置页过滤后已配对条数
+        [[QCLANLogger sharedLogger] info:@"UI" fmt:@"设置页解析已配对设备: 服务端返回 %lu 台, 过滤后 %lu 台",
+         (unsigned long)peersArr.count, (unsigned long)self.pairedDevices.count];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             [self buildUI];

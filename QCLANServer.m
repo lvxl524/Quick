@@ -168,7 +168,16 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
 - (void)loadPeers {
     NSString *path = @"/var/mobile/Library/QuickClipboard/peers.plist";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *fileAttrs = [fm attributesOfItemAtPath:path error:nil];
     NSArray *arr = [NSArray arrayWithContentsOfFile:path];
+    // v1.3.13: 诊断日志 —— 文件是否存在/大小, 帮助区分"写盘失败"与"读取失败"
+    if (fileAttrs) {
+        NSLog(@"[QuickClipboard] loadPeers: peers.plist 存在, size=%lld bytes, 反序列化条数=%lu",
+              [fileAttrs[NSFileSize] longLongValue], (unsigned long)arr.count);
+    } else {
+        NSLog(@"[QuickClipboard] loadPeers: peers.plist 不存在! (path=%@) → 列表为空", path);
+    }
     NSMutableArray *migrated = [NSMutableArray array];
     [_peers removeAllObjects];
     for (id obj in arr) {
@@ -226,8 +235,16 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             @"last_seen_at_ms":   @(peer.lastSeen ? [peer.lastSeen timeIntervalSince1970] * 1000.0 : 0),
         }];
     }
-    [arr writeToFile:path atomically:YES];
-    NSLog(@"[QuickClipboard] Saved %lu peers", (unsigned long)_peers.count);
+    // v1.3.13: 检查写盘结果, 失败必须打 ERROR —— 之前 writeToFile 返回值被忽略,
+    // 一旦落盘失败, 后续 GET /peers 强制 loadPeers 从磁盘读到空 → 设置页"已配对设备"列表为空
+    BOOL written = [arr writeToFile:path atomically:YES];
+    if (!written) {
+        NSLog(@"[QuickClipboard] ERROR: savePeers 写盘失败! path=%@ count=%lu", path, (unsigned long)arr.count);
+        [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"peers.plist 写盘失败! (%lu 台, %@)", (unsigned long)arr.count, path];
+        return;
+    }
+    NSLog(@"[QuickClipboard] Saved %lu peers to %@", (unsigned long)_peers.count, path);
+    [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"已保存已配对设备 %lu 台", (unsigned long)_peers.count];
 }
 
 - (NSString *)md5:(NSString *)input {
@@ -785,9 +802,18 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     peer.pairedAt  = [NSDate date];
     peer.lastSeen  = [NSDate date];
 
-    [_peers removeObject:peer];
+    // v1.3.13: QCLANPeer 未实现 isEqual:, 原 removeObject: 按指针比较必然失效
+    // → 改为按 device_id 去重 (同一设备重复配对不会累积重复条目)
+    NSArray *existingPeers = [_peers copy];
+    for (QCLANPeer *existing in existingPeers) {
+        if ([existing.deviceId isEqualToString:peer.deviceId]) {
+            [_peers removeObject:existing];
+        }
+    }
     [_peers addObject:peer];
     [self savePeers];
+    // v1.3.13: 保存后立即重载磁盘验证落盘 (与 GET /peers 的 loadPeers 路径一致)
+    [self loadPeers];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:QCLANDevicePairedNotification object:peer];
@@ -1453,9 +1479,17 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     peer.pairedAt  = [NSDate date];
     peer.lastSeen  = [NSDate date];
 
-    [_peers removeObject:peer];
+    // v1.3.13: 按 device_id 去重 (QCLANPeer 无 isEqual:, removeObject: 按指针会失效)
+    NSArray *existingPeers = [_peers copy];
+    for (QCLANPeer *existing in existingPeers) {
+        if ([existing.deviceId isEqualToString:peer.deviceId]) {
+            [_peers removeObject:existing];
+        }
+    }
     [_peers addObject:peer];
     [self savePeers];
+    // v1.3.13: 保存后立即重载磁盘, 验证落盘成功 (若 savePeers 写盘失败, 此处 _peers 会被磁盘旧数据覆盖 → 日志立即可见)
+    [self loadPeers];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:QCLANDevicePairedNotification object:peer];
