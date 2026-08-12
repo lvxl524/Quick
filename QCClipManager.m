@@ -9,6 +9,7 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
     NSString *_lastCheckSum;
     NSDate *_lastCaptureTime;
     dispatch_queue_t _worker;
+    BOOL _suppressNextCapture;
 }
 @end
 
@@ -34,18 +35,26 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 
 - (void)capturePasteboard:(UIPasteboard *)pasteboard {
     dispatch_async(_worker, ^{
+        // v1.3.8 修复: 接收端把内容写回剪贴板后, 会同步触发本 hook;
+        // 如果继续走自动同步, 会立刻把同一条内容再推回电脑, 造成乒乓循环。
+        // 因此在写入前设置抑制标记, 此处消费并直接丢弃。
+        if (self->_suppressNextCapture) {
+            self->_suppressNextCapture = NO;
+            return;
+        }
+
         QCClipItem *item = [self buildItemFromPasteboard:pasteboard];
         if (!item) return;
-        
+
         NSString *checkSum = item.checkSum ?: [item computeCheckSum];
         item.checkSum = checkSum;
-        
-        // Dedup within window
+
+        // Dedup within window: 同一内容 2 秒内只处理一次, 但 2 秒后重新复制仍可触发同步
         if ([checkSum isEqualToString:self->_lastCheckSum]) {
             NSDate *now = [NSDate date];
             if ([now timeIntervalSinceDate:self->_lastCaptureTime] < kDeduplicateWindow) return;
         }
-        
+
         QCClipItem *existing = [[QCStore sharedStore] itemWithCheckSum:checkSum];
         if (existing) {
             existing.updatedAt = [NSDate date];
@@ -53,9 +62,12 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
             [[QCStore sharedStore] updateItem:existing];
             self->_lastCheckSum = checkSum;
             self->_lastCaptureTime = [NSDate date];
+            // v1.3.8 修复: 用户复制了一条已存在于历史库里的内容(例如刚收到的电脑内容,
+            // 或之前复制过的内容)时, 仍应触发自动同步, 否则电脑端收不到。
+            [self triggerAutoSync];
             return;
         }
-        
+
         item.deviceID = [self deviceID];
         if ([[QCStore sharedStore] saveItem:item]) {
             self->_lastCheckSum = checkSum;
@@ -105,21 +117,32 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
 }
 
 - (void)writeItemToPasteboard:(QCClipItem *)item {
-    UIPasteboard *pb = [UIPasteboard generalPasteboard];
-    switch (item.type) {
-        case QCClipTypeImage:
-            if (item.payload) {
-                UIImage *image = [UIImage imageWithData:item.payload];
-                if (image) pb.image = image;
-            }
-            break;
-        case QCClipTypeURL:
-            if (item.textRepresentation) pb.URL = [NSURL URLWithString:item.textRepresentation];
-            break;
-        default:
-            if (item.textRepresentation) pb.string = item.textRepresentation;
-            break;
-    }
+    [self writeItemToPasteboard:item suppressBroadcast:NO];
+}
+
+- (void)writeItemToPasteboard:(QCClipItem *)item suppressBroadcast:(BOOL)suppress {
+    // 设置抑制标记与写入剪贴板必须在同一条串行 worker 队列里,
+    // 确保 hook 触发的 capturePasteboard 在标记仍有效时看到它。
+    dispatch_sync(_worker, ^{
+        if (suppress) {
+            self->_suppressNextCapture = YES;
+        }
+        UIPasteboard *pb = [UIPasteboard generalPasteboard];
+        switch (item.type) {
+            case QCClipTypeImage:
+                if (item.payload) {
+                    UIImage *image = [UIImage imageWithData:item.payload];
+                    if (image) pb.image = image;
+                }
+                break;
+            case QCClipTypeURL:
+                if (item.textRepresentation) pb.URL = [NSURL URLWithString:item.textRepresentation];
+                break;
+            default:
+                if (item.textRepresentation) pb.string = item.textRepresentation;
+                break;
+        }
+    });
 }
 
 - (void)triggerAutoSync {

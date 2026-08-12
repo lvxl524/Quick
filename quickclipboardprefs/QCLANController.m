@@ -148,6 +148,9 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 @property (nonatomic, copy) NSString *pairingCode;
 @property (nonatomic, copy) NSString *localAddress;
 
+@property (nonatomic, copy) NSString *peersLoadError;
+@property (nonatomic, assign) BOOL peersLoadedOnce;
+
 @property (nonatomic, strong) UITextField *peerUrlField;
 @property (nonatomic, strong) UITextField *peerCodeField;
 
@@ -207,12 +210,26 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 - (void)loadPeersFromServer {
     [self apiGet:@"/peers" completion:^(NSDictionary *json, NSError *error) {
         if (error || !json) {
+            self.peersLoadError = [NSString stringWithFormat:@"无法获取设备列表: %@",
+                                   error.localizedDescription ?: @"本地服务无响应"];
+            self.peersLoadedOnce = YES;
             [[QCLANLogger sharedLogger] error:@"UI" fmt:@"获取已配对设备列表失败: %@",
              error.localizedDescription ?: @"无响应"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self buildUI];
+            });
             return;
         }
         NSArray *peersArr = json[@"peers"];
-        if (![peersArr isKindOfClass:[NSArray class]]) return;
+        if (![peersArr isKindOfClass:[NSArray class]]) {
+            self.peersLoadError = @"服务返回异常，请稍后下拉刷新";
+            self.peersLoadedOnce = YES;
+            [[QCLANLogger sharedLogger] error:@"UI" fmt:@"获取已配对设备列表失败: 响应格式异常"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self buildUI];
+            });
+            return;
+        }
 
         [self.pairedDevices removeAllObjects];
         for (NSDictionary *dict in peersArr) {
@@ -232,6 +249,8 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
             peer.lastSeen  = lastSeenTs > 0 ? [NSDate dateWithTimeIntervalSince1970:lastSeenTs] : nil;
             if (peer.paired) [self.pairedDevices addObject:peer];
         }
+        self.peersLoadError = nil;
+        self.peersLoadedOnce = YES;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             [self buildUI];
@@ -727,11 +746,17 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
         [pairedCard.contentView.bottomAnchor constraintEqualToAnchor:prevRow.bottomAnchor].active = YES;
     } else {
         UILabel *emptyLabel = [[UILabel alloc] init];
-        emptyLabel.text = @"暂无已配对设备\n扫描局域网或手动输入地址进行配对";
+        if (self.peersLoadError.length > 0) {
+            emptyLabel.text = [NSString stringWithFormat:@"%@\n点击此处重新加载", self.peersLoadError];
+            emptyLabel.textColor = [UIColor systemRedColor];
+        } else {
+            emptyLabel.text = @"暂无已配对设备\n扫描局域网或手动输入地址进行配对";
+            emptyLabel.textColor = [UIColor tertiaryLabelColor];
+        }
         emptyLabel.font = [UIFont systemFontOfSize:13];
-        emptyLabel.textColor = [UIColor tertiaryLabelColor];
         emptyLabel.textAlignment = NSTextAlignmentCenter;
         emptyLabel.numberOfLines = 2;
+        emptyLabel.userInteractionEnabled = YES;
         emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
         [pairedCard.contentView addSubview:emptyLabel];
         [NSLayoutConstraint activateConstraints:@[
@@ -740,6 +765,9 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
             [emptyLabel.trailingAnchor constraintEqualToAnchor:pairedCard.contentView.trailingAnchor],
             [emptyLabel.bottomAnchor constraintEqualToAnchor:pairedCard.contentView.bottomAnchor constant:-8],
         ]];
+
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(loadPeersFromServer)];
+        [emptyLabel addGestureRecognizer:tap];
     }
 
     pairedCard.translatesAutoresizingMaskIntoConstraints = NO;

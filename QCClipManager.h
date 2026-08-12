@@ -6,6 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)sharedManager;
 - (void)capturePasteboard:(UIPasteboard *)pasteboard;
 - (void)writeItemToPasteboard:(QCClipItem *)item;
+- (void)writeItemToPasteboard:(QCClipItem *)item suppressBroadcast:(BOOL)suppress;
 @end
 
 NS_ASSUME_NONNULL_END

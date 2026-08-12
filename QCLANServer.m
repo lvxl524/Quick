@@ -569,10 +569,13 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
 
     // GET /peers —— 本地 UI 列出已配对设备
     } else if ([path isEqualToString:@"/peers"] && [method isEqualToString:@"GET"] && [address isEqualToString:kLoopbackIP]) {
+        // v1.3.8: 设置页打开时重新加载 peers.plist, 避免多进程/未同步导致的列表为空
+        [self loadPeers];
         NSMutableArray *jsonPeers = [NSMutableArray array];
         for (QCLANPeer *p in _peers) {
             [jsonPeers addObject:[self peerJSON:p]];
         }
+        [[QCLANLogger sharedLogger] info:@"UI" fmt:@"返回已配对设备列表: %lu 台", (unsigned long)_peers.count];
         responseData = [self jsonResponse:@{@"peers": jsonPeers} statusCode:&statusCode];
 
     // DELETE /peers/<device_id>
@@ -890,8 +893,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 });
             }
             // 关键修复: 收到的记录写入系统剪贴板, 用户可直接粘贴 (电脑端复制 → 手机端剪贴板)
+            // v1.3.8: suppressBroadcast=YES 防止写入剪贴板同步触发 hook, 避免把刚收到的内容立刻推回电脑
             if (latestItem) {
-                [[QCClipManager sharedManager] writeItemToPasteboard:latestItem];
+                [[QCClipManager sharedManager] writeItemToPasteboard:latestItem suppressBroadcast:YES];
                 NSString *preview = latestItem.textRepresentation;
                 if (preview.length > 40) preview = [preview substringToIndex:40];
                 [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把收到的内容写入剪贴板: %@", preview];
@@ -1651,9 +1655,17 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"自动推送(发送)已关闭, 跳过推送"];
         return;
     }
+
+    // v1.3.8 修复: tweak 会注入多个 UIKit 进程, 每个进程各自持有 _peers 内存。
+    // 如果用户先配对/重新配对, 之后再打开某个 App 并复制, 该 App 里的 _peers 可能还是旧的,
+    // 导致推送使用过期 token 而 403。每次广播前从磁盘重新加载, 保证使用最新配对信息。
+    [self loadPeers];
+
     NSArray *peers = [_peers copy];
     if (peers.count > 0) {
         [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"剪贴板变化, 自动推送到 %lu 台已配对设备", (unsigned long)peers.count];
+    } else {
+        [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"剪贴板变化, 但当前没有已配对设备可推送"];
     }
     for (QCLANPeer *peer in peers) {
         if (!peer.peerToken.length || !peer.baseURL.length) continue; // 仅推已配对
@@ -1865,8 +1877,9 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
             if (count > 0) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
                 // 关键修复: 拉取到的新增记录写入系统剪贴板, 用户可直接粘贴
+                // v1.3.8: suppressBroadcast=YES 避免把刚拉取的内容反向推回电脑
                 if (newestNewItem) {
-                    [[QCClipManager sharedManager] writeItemToPasteboard:newestNewItem];
+                    [[QCClipManager sharedManager] writeItemToPasteboard:newestNewItem suppressBroadcast:YES];
                     NSString *preview = newestNewItem.textRepresentation;
                     if (preview.length > 40) preview = [preview substringToIndex:40];
                     [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把拉取内容写入剪贴板: %@", preview];
