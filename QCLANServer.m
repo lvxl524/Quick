@@ -327,6 +327,14 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"HTTP 端口 %d 绑定失败: %s (可能被其他进程占用)", kDefaultLANPort, strerror(errno)];
         close(_listenSocket);
         _listenSocket = 0;
+        // v1.3.10: 自动重试接管端口。tweak 注入多个进程, 只有第一个能占用端口;
+        // 若持有端口的进程被系统杀掉, 本进程 3 秒后重试绑定即可接管, 无需注销。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), _queue, ^{
+            if (self->_running && self->_listenSocket == 0) {
+                [[QCLANLogger sharedLogger] warn:@"SYS" fmt:@"重试接管 HTTP 端口 %d ...", kDefaultLANPort];
+                [self startHTTPServer];
+            }
+        });
         return;
     }
 
@@ -335,6 +343,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"HTTP listen 失败: %s", strerror(errno)];
         close(_listenSocket);
         _listenSocket = 0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), _queue, ^{
+            if (self->_running && self->_listenSocket == 0) {
+                [[QCLANLogger sharedLogger] warn:@"SYS" fmt:@"重试接管 HTTP 端口 %d ...", kDefaultLANPort];
+                [self startHTTPServer];
+            }
+        });
         return;
     }
 
@@ -1069,6 +1083,13 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [[QCLANLogger sharedLogger] error:@"SYS" fmt:@"UDP 发现端口 %d 绑定失败: %s", kDiscoveryPort, strerror(errno)];
         close(_discoverySocket);
         _discoverySocket = 0;
+        // v1.3.10: 与 HTTP 端口同理, 自动重试接管 (持有者被杀后恢复发现能力)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), _discoveryQueue, ^{
+            if (self->_running && self->_discoverySocket == 0) {
+                [[QCLANLogger sharedLogger] warn:@"SYS" fmt:@"重试接管 UDP 发现端口 %d ...", kDiscoveryPort];
+                [self startDiscoveryListener];
+            }
+        });
         return;
     }
 

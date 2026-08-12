@@ -3,6 +3,7 @@
 #import "QCWebDAVClient.h"
 #import "QCLANServer.h"
 #import "QCLANLogger.h"
+#import <UserNotifications/UserNotifications.h>
 
 static const NSTimeInterval kDeduplicateWindow = 2.0;
 
@@ -13,6 +14,10 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
     // v1.3.9: 一次性标记改为时间窗口。接收端写回剪贴板会触发多个 hook
     // (如 setString: 内部级联 setItems:), 窗口期内全部忽略, 避免乒乓循环。
     NSDate *_suppressUntil;
+    // v1.3.10: 剪贴板 changeCount 轮询兜底。记录上一次看到的 changeCount,
+    // 变化即捕获。接收端写回剪贴板后同步更新, 防止轮询误捕获刚收到的内容。
+    NSInteger _lastChangeCount;
+    NSTimer *_pollTimer;
 }
 @end
 
@@ -158,6 +163,83 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
                 if (item.textRepresentation) pb.string = item.textRepresentation;
                 break;
         }
+        // v1.3.10: 记录本次写入后的 changeCount, 轮询检测到相同值会跳过,
+        // 防止把刚收到的内容误当作新复制再推回电脑 (乒乓循环双保险)。
+        self->_lastChangeCount = pb.changeCount;
+        self->_lastCheckSum = item.checkSum;
+        self->_lastCaptureTime = [NSDate date];
+    });
+}
+
+// v1.3.10: 剪贴板轮询兜底 —— 不依赖 hook 的发送通道。
+// 微信等 App 的复制若走 hook 覆盖不到的写入路径, 系统剪贴板 changeCount
+// 仍会变化, 轮询能发现并触发完整捕获链路 (保存 + 自动推送)。
+// 与 hook 共用同一去重/抑制窗口, 不会重复推送; 仅在 SpringBoard 进程调用。
+- (void)startPasteboardPolling {
+    dispatch_async(_worker, ^{
+        if (self->_pollTimer) return;
+        self->_lastChangeCount = [[UIPasteboard generalPasteboard] changeCount];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_pollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                                 target:self
+                                                               selector:@selector(pollPasteboardChange)
+                                                               userInfo:nil
+                                                                repeats:YES];
+        });
+    });
+}
+
+- (void)pollPasteboardChange {
+    // 所有状态读写都在 _worker 串行队列, 无竞争
+    dispatch_async(_worker, ^{
+        UIPasteboard *pb = [UIPasteboard generalPasteboard];
+        NSInteger cc = pb.changeCount;
+        if (cc == self->_lastChangeCount) return;  // 无变化, 静默
+        self->_lastChangeCount = cc;
+
+        // 抑制窗口: 接收端写回剪贴板触发的变化直接跳过 (防乒乓双保险)
+        NSDate *now = [NSDate date];
+        if (self->_suppressUntil && [now compare:self->_suppressUntil] == NSOrderedAscending) {
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询发现变化但处于接收回写抑制窗口, 跳过"];
+            return;
+        }
+
+        QCClipItem *item = [self buildItemFromPasteboard:pb];
+        if (!item) {
+            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"轮询: 剪贴板变化但无法解析内容"];
+            return;
+        }
+
+        NSString *checkSum = item.checkSum ?: [item computeCheckSum];
+        item.checkSum = checkSum;
+
+        // 与 hook 共用同一去重窗口
+        if ([checkSum isEqualToString:self->_lastCheckSum]) {
+            NSDate *now2 = [NSDate date];
+            if ([now2 timeIntervalSinceDate:self->_lastCaptureTime] < kDeduplicateWindow) return;
+        }
+
+        QCClipItem *existing = [[QCStore sharedStore] itemWithCheckSum:checkSum];
+        if (existing) {
+            existing.updatedAt = [NSDate date];
+            existing.deviceID = [self deviceID];
+            [[QCStore sharedStore] updateItem:existing];
+            self->_lastCheckSum = checkSum;
+            self->_lastCaptureTime = [NSDate date];
+            // 内容已存在 = 其他进程的 hook 已捕获并推送过, 不再重复推送
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询: 内容已存在(其他进程已处理), 跳过推送"];
+            return;
+        }
+
+        item.deviceID = [self deviceID];
+        if ([[QCStore sharedStore] saveItem:item]) {
+            self->_lastCheckSum = checkSum;
+            self->_lastCaptureTime = [NSDate date];
+            [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:item];
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"轮询捕获剪贴板新内容, 触发自动同步 (%@)",
+             item.textRepresentation.length > 20 ? [item.textRepresentation substringToIndex:20] : item.textRepresentation];
+            [self triggerAutoSync];
+        }
     });
 }
 
@@ -166,18 +248,48 @@ static const NSTimeInterval kDeduplicateWindow = 2.0;
     [[QCLANServer sharedServer] broadcastChange];
 }
 
+// v1.3.10: 真正的系统横幅通知 (UNUserNotificationCenter)。
+// 旧版用 UILocalNotification/presentLocalNotificationNow, 在 iOS 10+ 已废弃
+// 且不显示任何横幅 → 用户开了"同步通知"开关却毫无效果。
 - (void)handleLANSyncReceived:(NSNotification *)note {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSInteger count = [note.userInfo[@"count"] integerValue];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        UILocalNotification *localNotif = [[UILocalNotification alloc] init];
-        localNotif.alertTitle = @"QuickClipboard";
-        localNotif.alertBody = [NSString stringWithFormat:@"收到 %ld 条剪贴板同步内容", (long)count];
-        localNotif.soundName = UILocalNotificationDefaultSoundName;
-        [[UIApplication sharedApplication] presentLocalNotificationNow:localNotif];
-#pragma clang diagnostic pop
-    });
+    NSInteger count = [note.userInfo[@"count"] integerValue];
+    UNUserNotificationCenter *center = [UNUserNotificationCenter currentCenter];
+    [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *settings) {
+        if (settings.authorizationStatus == UNAuthorizationStatusNotDetermined) {
+            // 首次请求通知权限 (系统弹窗, 用户允许后显示横幅)
+            [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge)
+                                  completionHandler:^(BOOL granted, NSError *error) {
+                if (granted) {
+                    [self postReceivedLocalNotificationWithCount:count];
+                } else {
+                    [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限被拒绝, 无法弹横幅提示 (%@)", error ? error.localizedDescription : @"用户拒绝"];
+                }
+            }];
+        } else if (settings.authorizationStatus == UNAuthorizationStatusAuthorized ||
+                   settings.authorizationStatus == UNAuthorizationStatusProvisional) {
+            [self postReceivedLocalNotificationWithCount:count];
+        } else {
+            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"通知权限未开启, 无法弹横幅提示 (状态 %ld)", (long)settings.authorizationStatus];
+        }
+    }];
+}
+
+- (void)postReceivedLocalNotificationWithCount:(NSInteger)count {
+    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+    content.title = @"QuickClipboard";
+    content.body = [NSString stringWithFormat:@"已收到 %ld 条剪贴板同步内容, 已写入剪贴板可直接粘贴", (long)count];
+    content.sound = [UNNotificationSound defaultSound];
+    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:[NSUUID UUID].UUIDString
+                                                                          content:content
+                                                                          trigger:nil];
+    [[UNUserNotificationCenter currentCenter] addNotificationRequest:request
+                                               withCompletionHandler:^(NSError *error) {
+        if (error) {
+            [[QCLANLogger sharedLogger] warn:@"SYNC" fmt:@"发送系统通知失败: %@", error.localizedDescription];
+        } else {
+            [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已弹系统横幅通知 (%ld 条)", (long)count];
+        }
+    }];
 }
 
 - (NSString *)deviceID {

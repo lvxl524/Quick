@@ -6,6 +6,9 @@ mkdir -p /var/mobile/Library/QuickClipboard
 chown -R mobile:mobile /var/mobile/Library/QuickClipboard
 chmod 755 /var/mobile/Library/QuickClipboard
 
-killall -9 SpringBoard || true
+# v1.3.10: 不再强制 killall SpringBoard。
+# 包内包含 MobileSubstrate dylib, Sileo/Zebra 安装完成会自动弹出
+# "稍后注销 / 注销" 选择; 立即注销剥夺了用户选择权, 且可能中断其他安装操作。
+# 若用户选择"稍后注销", 下次手动注销/重启后 tweak 生效。
 
 exit 0
