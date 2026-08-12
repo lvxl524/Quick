@@ -9,7 +9,7 @@
 @property (nonatomic, strong) UISegmentedControl *segmentedControl;
 @property (nonatomic, strong) QCWebDAVController *webDAVController;
 @property (nonatomic, strong) QCLANController *lanController;
-@property (nonatomic, strong) UIButton *logButton;   // 左上角感叹号 → 日志面板 (WebDAV/局域网 均可用)
+@property (nonatomic, strong) UIButton *logButton;   // 右上角感叹号 → 日志面板 (WebDAV/局域网 均可用)
 @end
 
 @implementation QCRootListController
@@ -37,7 +37,7 @@
     self.webDAVController.view.frame = self.view.bounds;
     self.webDAVController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-    // 左上角全局日志按钮 (版本号只在日志面板内显示)
+    // 右上角全局日志按钮 (版本号只在日志面板内显示)
     [self setupLogButton];
 }
 
@@ -59,7 +59,7 @@
     [self.view addSubview:self.logButton];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.logButton.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:6],
+        [self.logButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-6],
         [self.logButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
         [self.logButton.widthAnchor constraintEqualToConstant:38],
         [self.logButton.heightAnchor constraintEqualToConstant:38],

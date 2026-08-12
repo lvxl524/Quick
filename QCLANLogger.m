@@ -7,6 +7,7 @@ NSString * const QCLANLogFilePath = @"/var/mobile/Library/QuickClipboard/lan_log
 
 static const NSUInteger      kMaxMemoryLines = 600;
 static const unsigned long long kMaxFileBytes = 512 * 1024;
+static NSString * const kLoggingEnabledKey = @"lanLoggingEnabled";
 
 @implementation QCLANLogger {
     NSMutableArray<NSString *> *_memory;
@@ -104,9 +105,26 @@ static const unsigned long long kMaxFileBytes = 512 * 1024;
     });
 }
 
+#pragma mark - Logging toggle
+
++ (BOOL)isLoggingEnabled {
+    // 默认开启: 未设置过该 key 时返回 YES
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d objectForKey:kLoggingEnabledKey] == nil) return YES;
+    return [d boolForKey:kLoggingEnabledKey];
+}
+
++ (void)setLoggingEnabled:(BOOL)enabled {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setBool:enabled forKey:kLoggingEnabledKey];
+    [d synchronize];
+}
+
 #pragma mark - Internals
 
 - (void)appendLevel:(QCLANLogLevel)level category:(NSString *)category message:(NSString *)message {
+    // 日志总开关: 关闭后不再写入 (跨进程, Preferences 与 SpringBoard 均检查)
+    if (![QCLANLogger isLoggingEnabled]) return;
     NSString *line = [self makeLine:level category:category message:message];
     dispatch_async(_queue, ^{
         [self->_memory addObject:line];

@@ -34,6 +34,10 @@ typedef NS_ENUM(NSInteger, QCLANLogLevel) {
 // 清空日志 (同步, truncate 文件 + 清本进程内存)
 - (void)clearLog;
 
+// 日志记录总开关 (NSUserDefaults 持久化, Preferences/SpringBoard 两进程同步生效)
++ (BOOL)isLoggingEnabled;
++ (void)setLoggingEnabled:(BOOL)enabled;
+
 // 当前文件行数
 - (NSUInteger)fileLineCount;
 

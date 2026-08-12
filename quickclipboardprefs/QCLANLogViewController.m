@@ -9,6 +9,7 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 @property (nonatomic, strong) UILabel *metaLabel;     // device_id / 日志行数
 @property (nonatomic, strong) UISegmentedControl *filterControl;
 @property (nonatomic, strong) UISwitch *autoScrollSwitch;
+@property (nonatomic, strong) UISwitch *logSwitch;
 @property (nonatomic, strong) UITextView *textView;
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @property (nonatomic, copy) NSString *deviceIdDisplay;
@@ -73,7 +74,7 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
     self.metaLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.metaLabel];
 
-    // 工具行: 过滤 + 自动滚动
+    // 工具行: 过滤 + 自动滚动 + 日志开关
     UIView *toolbar = [[UIView alloc] init];
     toolbar.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:toolbar];
@@ -97,6 +98,20 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
     self.autoScrollSwitch.translatesAutoresizingMaskIntoConstraints = NO;
     [toolbar addSubview:self.autoScrollSwitch];
 
+    UILabel *logLabel = [[UILabel alloc] init];
+    logLabel.text = @"日志";
+    logLabel.font = [UIFont systemFontOfSize:12];
+    logLabel.textColor = [UIColor secondaryLabelColor];
+    logLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [toolbar addSubview:logLabel];
+
+    self.logSwitch = [[UISwitch alloc] init];
+    self.logSwitch.on = [QCLANLogger isLoggingEnabled];
+    self.logSwitch.transform = CGAffineTransformMakeScale(0.75, 0.75);
+    [self.logSwitch addTarget:self action:@selector(logSwitchChanged) forControlEvents:UIControlEventValueChanged];
+    self.logSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    [toolbar addSubview:self.logSwitch];
+
     [NSLayoutConstraint activateConstraints:@[
         [self.filterControl.leadingAnchor constraintEqualToAnchor:toolbar.leadingAnchor],
         [self.filterControl.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
@@ -104,7 +119,11 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
         [scrollLabel.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
         [self.autoScrollSwitch.leadingAnchor constraintEqualToAnchor:scrollLabel.trailingAnchor constant:2],
         [self.autoScrollSwitch.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
-        [toolbar.trailingAnchor constraintEqualToAnchor:self.autoScrollSwitch.trailingAnchor],
+        [logLabel.leadingAnchor constraintEqualToAnchor:self.autoScrollSwitch.trailingAnchor constant:12],
+        [logLabel.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
+        [self.logSwitch.leadingAnchor constraintEqualToAnchor:logLabel.trailingAnchor constant:2],
+        [self.logSwitch.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
+        [toolbar.trailingAnchor constraintEqualToAnchor:self.logSwitch.trailingAnchor],
     ]];
 
     // 日志文本
@@ -195,6 +214,15 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 
 - (void)filterChanged {
     [self refreshLog];
+}
+
+- (void)logSwitchChanged {
+    BOOL enabled = self.logSwitch.isOn;
+    [QCLANLogger setLoggingEnabled:enabled];
+    if (enabled) {
+        // 开启日志时记一条, 便于确认生效
+        [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户开启日志记录"];
+    }
 }
 
 - (void)closeTapped {

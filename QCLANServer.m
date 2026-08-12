@@ -1,6 +1,8 @@
 #import "QCLANServer.h"
 #import "QCStore.h"
 #import "QCLANLogger.h"
+#import "QCClipManager.h"
+#import <UIKit/UIKit.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
@@ -850,6 +852,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSDictionary *batch = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
     NSArray *records = [batch isKindOfClass:[NSDictionary class]] ? batch[@"records"] : nil;
     NSMutableArray *changed = [NSMutableArray array];
+    QCClipItem *latestItem = nil;
     if ([records isKindOfClass:[NSArray class]]) {
         for (NSDictionary *dict in records) {
             if (![dict isKindOfClass:[NSDictionary class]]) continue;
@@ -862,10 +865,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                     item.favorite = existing.favorite;
                     [[QCStore sharedStore] saveItem:item];
                     [changed addObject:[self cloudRecordFromItem:item]];
+                    latestItem = item;
                 }
             } else {
                 [[QCStore sharedStore] saveItem:item];
                 [changed addObject:[self cloudRecordFromItem:item]];
+                latestItem = item;
             }
         }
         if (changed.count > 0) {
@@ -877,6 +882,13 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                                                                         object:nil
                                                                       userInfo:@{@"count": @(changed.count)}];
                 });
+            }
+            // 关键修复: 收到的记录写入系统剪贴板, 用户可直接粘贴 (电脑端复制 → 手机端剪贴板)
+            if (latestItem) {
+                [[QCClipManager sharedManager] writeItemToPasteboard:latestItem];
+                NSString *preview = latestItem.textRepresentation;
+                if (preview.length > 40) preview = [preview substringToIndex:40];
+                [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把收到的内容写入剪贴板: %@", preview];
             }
         }
     }
@@ -1658,16 +1670,36 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
     [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        BOOL ok = [(NSHTTPURLResponse *)response statusCode] == 200;
+        NSInteger code = [(NSHTTPURLResponse *)response statusCode];
+        BOOL ok = code == 200;
+        NSString *detail = nil;
+        if (data.length > 0) {
+            NSDictionary *respJson = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([respJson isKindOfClass:[NSDictionary class]]) {
+                detail = respJson[@"message"];
+            }
+        }
         if (!ok) {
-            NSLog(@"[QuickClipboard] Push to %@ failed: %@", peer.deviceId, error.localizedDescription ?: @"non-200");
-            NSInteger code = [(NSHTTPURLResponse *)response statusCode];
-            [[QCLANLogger sharedLogger] error:@"SYNC" fmt:@"推送到 %@ 失败: %@ (HTTP %ld)",
-             peer.baseURL, error.localizedDescription ?: @"非200响应", (long)code];
+            NSLog(@"[QuickClipboard] Push to %@ failed: %@ (HTTP %ld)", peer.deviceId,
+                  error.localizedDescription ?: (detail ?: @"非200响应"), (long)code);
+            [[QCLANLogger sharedLogger] error:@"SYNC" fmt:@"推送到 %@ 失败: %@ (HTTP %ld, 详情: %@)",
+             peer.baseURL, error.localizedDescription ?: @"非200响应", (long)code,
+             detail ?: @"(无)"];
         } else {
             [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"推送成功: %@", peer.baseURL];
         }
-        if (completion) completion(ok, ok ? @"已推送" : (error.localizedDescription ?: @"推送失败"));
+        if (completion) {
+            if (ok) {
+                completion(YES, @"已推送");
+            } else if (error) {
+                completion(NO, error.localizedDescription ?: @"推送失败");
+            } else if (detail.length > 0) {
+                // 桌面端 403 等会返回具体原因 (如: 局域网接收已关闭), 直接透传给用户
+                completion(NO, [NSString stringWithFormat:@"对方拒绝: %@", detail]);
+            } else {
+                completion(NO, [NSString stringWithFormat:@"推送失败 (HTTP %ld)", (long)code]);
+            }
+        }
     }] resume];
 }
 
@@ -1704,6 +1736,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         NSDictionary *batch = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSArray *records = [batch isKindOfClass:[NSDictionary class]] ? batch[@"records"] : nil;
         NSUInteger count = 0;
+        QCClipItem *latestItem = nil;
         if ([records isKindOfClass:[NSArray class]]) {
             NSMutableArray *received = [NSMutableArray array];
             for (NSDictionary *dict in records) {
@@ -1713,10 +1746,18 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
                 if (!existing) {
                     [[QCStore sharedStore] saveItem:item];
                     count++;
+                    latestItem = item;
                 }
             }
             if (count > 0) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:QCClipDidChangeNotification object:nil];
+                // 关键修复: 拉取到的记录写入系统剪贴板, 用户可直接粘贴
+                if (latestItem) {
+                    [[QCClipManager sharedManager] writeItemToPasteboard:latestItem];
+                    NSString *preview = latestItem.textRepresentation;
+                    if (preview.length > 40) preview = [preview substringToIndex:40];
+                    [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"已把拉取内容写入剪贴板: %@", preview];
+                }
             }
         }
         [[QCLANLogger sharedLogger] info:@"SYNC" fmt:@"拉取完成: 新增 %lu 条", (unsigned long)count];
