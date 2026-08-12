@@ -25,10 +25,16 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
                                                                              style:UIBarButtonItemStylePlain
                                                                             target:self
                                                                             action:@selector(closeTapped)];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"清空"
-                                                                              style:UIBarButtonItemStylePlain
-                                                                             target:self
-                                                                             action:@selector(clearTapped)];
+    // 右侧: 导出 + 清空 (版本号只显示在面板 header, 不放在按钮标题里)
+    UIBarButtonItem *exportItem = [[UIBarButtonItem alloc] initWithTitle:@"导出"
+                                                                   style:UIBarButtonItemStylePlain
+                                                                  target:self
+                                                                  action:@selector(exportTapped)];
+    UIBarButtonItem *clearItem = [[UIBarButtonItem alloc] initWithTitle:@"清空"
+                                                                  style:UIBarButtonItemStylePlain
+                                                                 target:self
+                                                                 action:@selector(clearTapped)];
+    self.navigationItem.rightBarButtonItems = @[clearItem, exportItem];
 
     [self buildUI];
     [self fetchDeviceInfo];
@@ -204,6 +210,48 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
         [[QCLANLogger sharedLogger] clearLog];
         [self refreshLog];
     }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// 导出完整日志: 复制到剪贴板 + 写入 /var/mobile/Media/QuickClipboard/ 便于取出
+- (void)exportTapped {
+    NSArray *lines = [[QCLANLogger sharedLogger] displayLines:3000];
+    NSMutableString *log = [NSMutableString string];
+    [log appendFormat:@"QuickClipboard v%@ 日志导出\n", QC_VERSION];
+    [log appendFormat:@"device_id: %@\n", self.deviceIdDisplay ?: @"-"];
+    [log appendFormat:@"时间: %@\n", [NSDate date]];
+    [log appendString:@"========================================\n"];
+    for (NSString *line in lines) {
+        [log appendString:line];
+        [log appendString:@"\n"];
+    }
+    if (lines.count == 0) {
+        [log appendString:@"(暂无日志)\n"];
+    }
+
+    // 1. 复制到剪贴板 (可直接粘贴发送)
+    [UIPasteboard generalPasteboard].string = log;
+
+    // 2. 写文件 (便于通过文件管理器取出)
+    NSString *dir = @"/var/mobile/Media/QuickClipboard";
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"yyyyMMdd_HHmmss";
+    NSString *path = [dir stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"lan_export_%@.txt", [fmt stringFromDate:[NSDate date]]]];
+    NSError *writeError = nil;
+    BOOL wrote = [log writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
+    if (!wrote) {
+        path = [NSString stringWithFormat:@"写入失败: %@", writeError.localizedDescription ?: @"未知错误"];
+    }
+
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户导出日志 (%lu 行)", (unsigned long)lines.count];
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"日志已导出"
+                                                                   message:[NSString stringWithFormat:@"已复制 %lu 行日志到剪贴板，可直接粘贴发送。\n\n文件: %@", (unsigned long)lines.count, path]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 

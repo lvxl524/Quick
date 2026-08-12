@@ -54,6 +54,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     int _discoverySocket;
     dispatch_queue_t _queue;
     dispatch_queue_t _discoveryQueue;   // UDP 独立队列, 避免同步扫描阻塞 HTTP 主队列时收不到响应
+    dispatch_queue_t _scanQueue;        // 扫描专用队列 (同一 socket 收发, 不阻塞 HTTP 主队列)
     dispatch_source_t _listenSource;
     dispatch_source_t _discoverySource;
     NSMutableArray<QCLANPeer *> *_peers;
@@ -81,6 +82,7 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     if (self) {
         _queue = dispatch_queue_create("com.mosheng.quickclipboard.lan", DISPATCH_QUEUE_SERIAL);
         _discoveryQueue = dispatch_queue_create("com.mosheng.quickclipboard.lan.discovery", DISPATCH_QUEUE_SERIAL);
+        _scanQueue = dispatch_queue_create("com.mosheng.quickclipboard.lan.scan", DISPATCH_QUEUE_SERIAL);
         _peers = [NSMutableArray array];
         _discoveredPeers = [NSMutableDictionary dictionary];
         _port = kDefaultLANPort;
@@ -1078,8 +1080,6 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     NSString *protocol = packet[@"protocol"];
     NSString *kind     = packet[@"kind"];
     NSString *deviceId = packet[@"device_id"] ?: @"";
-    NSString *deviceName = packet[@"device_name"] ?: @"Unknown";
-    NSNumber *httpPort = packet[@"http_port"];
 
     if (![protocol isEqualToString:kDiscoveryProtocol]) {
         [[QCLANLogger sharedLogger] warn:@"NET" fmt:@"收到非本协议 UDP 包 (protocol=%@) 来自 %@, 忽略",
@@ -1106,110 +1106,24 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
          senderIP, sent];
 
     } else if ([kind isEqualToString:@"response"]) {
-        // 收到发现响应 → 记录 peer
-        uint16_t port = httpPort ? [httpPort unsignedShortValue] : kDefaultLANPort;
-        NSString *baseURL = [NSString stringWithFormat:@"http://%@:%hu", senderIP, port];
-
-        QCLANPeer *peer = [[QCLANPeer alloc] init];
-        peer.deviceId  = deviceId;
-        peer.name      = deviceName;
-        peer.address   = senderIP;
-        peer.port      = port;
-        peer.baseURL   = baseURL;
-        peer.lastSeen  = [NSDate date];
-        peer.paired    = NO;
-
-        for (QCLANPeer *p in _peers) {
-            if ([p.deviceId isEqualToString:peer.deviceId]) {
-                peer.paired = YES;
-                peer.name  = p.name;
-                peer.peerToken = p.peerToken;
-                break;
-            }
-        }
-
+        // 收到发现响应 (对方直接回 35692) → 记录 peer, 复用统一解析逻辑
+        NSData *pkt = [msg dataUsingEncoding:NSUTF8StringEncoding];
         @synchronized (_discoveredPeers) {
-            _discoveredPeers[peer.deviceId] = peer;
+            [self consumeDiscoveryResponseData:pkt fromSender:&senderAddr intoDict:_discoveredPeers];
         }
-        NSLog(@"[QuickClipboard] Discovered: %@ (%@, base: %@, paired=%d)", deviceName, deviceId, baseURL, peer.paired);
-        [[QCLANLogger sharedLogger] info:@"NET" fmt:@"发现设备: %@ (%@, base=%@, 已配对=%d)",
-         deviceName, deviceId, baseURL, peer.paired];
     }
 }
 
 
 #pragma mark - Scanning (桌面端 discovery 请求包)
 
-- (void)scanForDevicesWithCompletion:(void (^)(NSArray<QCLANPeer *> *devices))completion {
-    dispatch_async(_queue, ^{
-        [self performScanWithCompletion:completion];
-    });
-}
-
-- (void)performScanWithCompletion:(void (^)(NSArray<QCLANPeer *> *devices))completion {
-    [_discoveredPeers removeAllObjects];
-    [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"开始扫描局域网 (UDP %d, 持续3秒)", kDiscoveryPort];
-    [self sendDiscoveryBroadcast];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), _queue, ^{
-        [self sendDiscoveryBroadcast];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), self->_queue, ^{
-            NSArray *results = [self->_discoveredPeers.allValues sortedArrayUsingComparator:^NSComparisonResult(QCLANPeer *a, QCLANPeer *b) {
-                return [a.name compare:b.name];
-            }];
-            [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"扫描完成: 发现 %lu 台设备", (unsigned long)results.count];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(results);
-            });
-        });
-    });
-}
-
-// 同步扫描 (供本地 HTTP /scan 调用, 临时队列避免死锁)
-- (NSArray<QCLANPeer *> *)performScanNow {
-    dispatch_queue_t scanQueue = dispatch_queue_create("com.mosheng.qc.scantmp", DISPATCH_QUEUE_SERIAL);
-    __block NSArray *results = @[];
-
-    dispatch_sync(scanQueue, ^{
-        NSMutableDictionary<NSString *, QCLANPeer *> *found = [NSMutableDictionary dictionary];
-        [self sendDiscoveryBroadcast];
-
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.5];
-        BOOL resent = NO;
-
-        while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
-            @synchronized (self->_discoveredPeers) {
-                for (NSString *key in self->_discoveredPeers) {
-                    if (!found[key]) found[key] = self->_discoveredPeers[key];
-                }
-            }
-            if (!resent && [[NSDate date] timeIntervalSinceDate:deadline] < -1.5) {
-                [self sendDiscoveryBroadcast];
-                resent = YES;
-            }
-            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-        }
-
-        results = [found.allValues sortedArrayUsingComparator:^NSComparisonResult(QCLANPeer *a, QCLANPeer *b) {
-            return [a.name compare:b.name];
-        }];
-    });
-
-    return results;
-}
-
 // 发送桌面端格式的 discovery 请求包 (kind=request, http_port=0)
-- (void)sendDiscoveryBroadcast {
-    int sendSock = socket(AF_INET, SOCK_DGRAM, 0);
+// 用调用方传入的 socket 发送 (该 socket 保持存活以接收响应, 与桌面端 discover() 一致)
+- (void)sendDiscoveryBroadcastOnSocket:(int)sendSock {
     if (sendSock < 0) {
-        NSLog(@"[QuickClipboard] ERROR: Failed to create broadcast socket: %s", strerror(errno));
-        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"创建广播 socket 失败: %s", strerror(errno)];
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"发送发现广播失败: socket 无效"];
         return;
     }
-
-    int on = 1;
-    setsockopt(sendSock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
 
     NSDictionary *request = @{
         @"protocol":    kDiscoveryProtocol,
@@ -1256,10 +1170,156 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         freeifaddrs(ifaddr);
     }
 
-    close(sendSock);
-    NSLog(@"[QuickClipboard] Discovery request broadcast sent (protocol %@)", kDiscoveryProtocol);
-    [[QCLANLogger sharedLogger] info:@"NET" fmt:@"发送 UDP 发现广播 (255.255.255.255:%d + 各子网广播)",
-     kDiscoveryPort];
+    NSLog(@"[QuickClipboard] Discovery request broadcast sent via socket %d", sendSock);
+    [[QCLANLogger sharedLogger] info:@"NET" fmt:@"发送 UDP 发现广播 (255.255.255.255:%d + 各子网广播, socket %d)",
+     kDiscoveryPort, sendSock];
+}
+
+// 解析一条 UDP 发现响应包并写入扫描结果字典 (与桌面端 discover() 的 response 过滤逻辑一致)
+- (void)consumeDiscoveryResponseData:(NSData *)data
+                          fromSender:(struct sockaddr_in *)senderAddr
+                             intoDict:(NSMutableDictionary<NSString *, QCLANPeer *> *)dict {
+    NSDictionary *packet = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![packet isKindOfClass:[NSDictionary class]]) return;
+
+    NSString *protocol = packet[@"protocol"];
+    NSString *kind     = packet[@"kind"];
+    NSString *deviceId = packet[@"device_id"] ?: @"";
+    NSString *deviceName = packet[@"device_name"] ?: @"Unknown";
+    NSNumber *httpPort = packet[@"http_port"];
+
+    if (![protocol isEqualToString:kDiscoveryProtocol]) {
+        [[QCLANLogger sharedLogger] warn:@"NET" fmt:@"收到非本协议 UDP 包 (protocol=%@), 忽略", protocol ?: @"空"];
+        return;
+    }
+    if (![kind isEqualToString:@"response"]) return; // 只消费 response
+    if (deviceId.length == 0 || [deviceId isEqualToString:[self deviceId]]) return; // 忽略自身
+
+    NSString *senderIP = senderAddr ? [NSString stringWithUTF8String:inet_ntoa(senderAddr->sin_addr)] : @"?";
+    uint16_t port = httpPort ? [httpPort unsignedShortValue] : kDefaultLANPort;
+    NSString *baseURL = [NSString stringWithFormat:@"http://%@:%hu", senderIP, port];
+
+    QCLANPeer *peer = [[QCLANPeer alloc] init];
+    peer.deviceId  = deviceId;
+    peer.name      = deviceName;
+    peer.address   = senderIP;
+    peer.port      = port;
+    peer.baseURL   = baseURL;
+    peer.lastSeen  = [NSDate date];
+    peer.paired    = NO;
+
+    for (QCLANPeer *p in _peers) {
+        if ([p.deviceId isEqualToString:peer.deviceId]) {
+            peer.paired = YES;
+            peer.name  = p.name;
+            peer.peerToken = p.peerToken;
+            break;
+        }
+    }
+
+    dict[peer.deviceId] = peer;
+    NSLog(@"[QuickClipboard] Discovered via scan socket: %@ (%@, base: %@, paired=%d)", deviceName, deviceId, baseURL, peer.paired);
+    [[QCLANLogger sharedLogger] info:@"NET" fmt:@"扫描收到响应: %@ (%@, base=%@, 已配对=%d)",
+     deviceName, deviceId, baseURL, peer.paired];
+}
+
+// 扫描核心: 同一 UDP socket 发送广播并接收响应 (与桌面端 discover() 完全一致),
+// 修复旧版"发送后立即关闭 socket 导致响应丢包、永远扫不到设备"的问题
+- (NSArray<QCLANPeer *> *)performScanCoreDuration:(NSTimeInterval)duration {
+    @synchronized (_discoveredPeers) {
+        [_discoveredPeers removeAllObjects];
+    }
+    [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"开始扫描局域网 (UDP %d, 持续%.1f秒)", kDiscoveryPort, duration];
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        NSLog(@"[QuickClipboard] ERROR: Failed to create scan socket: %s", strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"创建扫描 socket 失败: %s", strerror(errno)];
+        return @[];
+    }
+
+    int on = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
+
+    // 绑定随机端口: 固定源端口, 保证对端 response 能回到本 socket
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        NSLog(@"[QuickClipboard] ERROR: Failed to bind scan socket: %s", strerror(errno));
+        [[QCLANLogger sharedLogger] error:@"NET" fmt:@"扫描 socket bind 失败: %s", strerror(errno)];
+        close(sock);
+        return @[];
+    }
+
+    NSMutableDictionary<NSString *, QCLANPeer *> *found = [NSMutableDictionary dictionary];
+    [self sendDiscoveryBroadcastOnSocket:sock];
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:duration];
+    BOOL resent = NO;
+
+    while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
+        // 100ms 接收超时, 避免忙等, 同时能按时重发广播
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        char buffer[2048];
+        struct sockaddr_in senderAddr;
+        socklen_t senderLen = sizeof(senderAddr);
+        ssize_t len = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
+                               (struct sockaddr *)&senderAddr, &senderLen);
+        if (len > 0) {
+            NSData *pkt = [NSData dataWithBytes:buffer length:(NSUInteger)len];
+            [self consumeDiscoveryResponseData:pkt fromSender:&senderAddr intoDict:found];
+        }
+
+        NSTimeInterval remaining = [deadline timeIntervalSinceNow];
+        if (!resent && remaining < duration * 0.4) {
+            [self sendDiscoveryBroadcastOnSocket:sock];
+            resent = YES;
+            [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"扫描过半, 重发发现广播"];
+        }
+    }
+
+    close(sock);
+
+    NSArray *results = [found.allValues sortedArrayUsingComparator:^NSComparisonResult(QCLANPeer *a, QCLANPeer *b) {
+        return [a.name compare:b.name];
+    }];
+    [[QCLANLogger sharedLogger] info:@"SCAN" fmt:@"扫描完成: 发现 %lu 台设备", (unsigned long)results.count];
+    @synchronized (_discoveredPeers) {
+        [_discoveredPeers removeAllObjects];
+        for (QCLANPeer *p in results) _discoveredPeers[p.deviceId] = p;
+    }
+    return results;
+}
+
+// 异步扫描 (UI 调用): 扫描在独立队列执行, 不阻塞 HTTP 主队列
+- (void)performScanWithCompletion:(void (^)(NSArray<QCLANPeer *> *devices))completion {
+    dispatch_async(_scanQueue, ^{
+        NSArray *results = [self performScanCoreDuration:3.0];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(results);
+        });
+    });
+}
+
+// 兼容入口 (头文件声明保留)
+- (void)scanForDevicesWithCompletion:(void (^)(NSArray<QCLANPeer *> *devices))completion {
+    [self performScanWithCompletion:completion];
+}
+
+// 同步扫描 (本地 HTTP /scan 调用, 独立队列避免死锁)
+- (NSArray<QCLANPeer *> *)performScanNow {
+    __block NSArray *results = @[];
+    dispatch_sync(_scanQueue, ^{
+        results = [self performScanCoreDuration:2.5];
+    });
+    return results;
 }
 
 

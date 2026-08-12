@@ -1,13 +1,15 @@
 #import "QCRootListController.h"
 #import "QCWebDAVController.h"
 #import "QCLANController.h"
+#import "QCLANLogViewController.h"
+#import "QCLANLogger.h"
 #import "../QuickClipboard.h"
 
 @interface QCRootListController ()
 @property (nonatomic, strong) UISegmentedControl *segmentedControl;
 @property (nonatomic, strong) QCWebDAVController *webDAVController;
 @property (nonatomic, strong) QCLANController *lanController;
-@property (nonatomic, strong) UILabel *versionLabel;
+@property (nonatomic, strong) UIButton *logButton;   // 左上角感叹号 → 日志面板 (WebDAV/局域网 均可用)
 @end
 
 @implementation QCRootListController
@@ -35,26 +37,42 @@
     self.webDAVController.view.frame = self.view.bounds;
     self.webDAVController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-    // Version label at the bottom
-    [self setupVersionLabel];
+    // 左上角全局日志按钮 (版本号只在日志面板内显示)
+    [self setupLogButton];
 }
 
-- (void)setupVersionLabel {
-    self.versionLabel = [[UILabel alloc] init];
-    self.versionLabel.text = [NSString stringWithFormat:@"QuickClipboard v%@", QC_VERSION];
-    self.versionLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    self.versionLabel.textColor = [UIColor grayColor];
-    self.versionLabel.textAlignment = NSTextAlignmentCenter;
-    self.versionLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.versionLabel];
+- (void)setupLogButton {
+    self.logButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    UIImage *icon = [UIImage systemImageNamed:@"exclamationmark.circle.fill"];
+    if (icon) {
+        [self.logButton setImage:icon forState:UIControlStateNormal];
+    } else {
+        [self.logButton setTitle:@"!" forState:UIControlStateNormal];
+        self.logButton.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+    }
+    // 无背景色/无外圈, 仅保留图标本身, 内部大小不变
+    self.logButton.backgroundColor = [UIColor clearColor];
+    self.logButton.tintColor = [UIColor systemBlueColor];
+    self.logButton.accessibilityLabel = @"查看局域网日志";
+    [self.logButton addTarget:self action:@selector(openLogPanel) forControlEvents:UIControlEventTouchUpInside];
+    self.logButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.logButton];
 
-    // Pin to bottom with a safe area inset
     [NSLayoutConstraint activateConstraints:@[
-        [self.versionLabel.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [self.versionLabel.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-12],
-        [self.versionLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:16],
-        [self.versionLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-16]
+        [self.logButton.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:6],
+        [self.logButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
+        [self.logButton.widthAnchor constraintEqualToConstant:38],
+        [self.logButton.heightAnchor constraintEqualToConstant:38],
     ]];
+    [self.view bringSubviewToFront:self.logButton];
+}
+
+- (void)openLogPanel {
+    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户打开日志面板 (v%@)", QC_VERSION];
+    QCLANLogViewController *logVC = [[QCLANLogViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logVC];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)segmentChanged:(UISegmentedControl *)sender {
@@ -69,8 +87,8 @@
         self.lanController.view.frame = self.view.bounds;
         self.lanController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     }
-    // Bring version label to front
-    [self.view bringSubviewToFront:self.versionLabel];
+    // 保持日志按钮在最上层
+    [self.view bringSubviewToFront:self.logButton];
 }
 
 @end

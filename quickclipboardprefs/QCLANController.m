@@ -1,7 +1,6 @@
 #import "QCLANController.h"
 #import "QCLANServer.h"
 #import "QCLANLogger.h"
-#import "QCLANLogViewController.h"
 #import "QCStore.h"
 #import <objc/runtime.h>
 #import <ifaddrs.h>
@@ -156,7 +155,6 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 @property (nonatomic, strong) QCLANStatusPill *dataPill;
 @property (nonatomic, strong) UILabel *codeLabel;
 @property (nonatomic, strong) UILabel *endpointLabel;
-@property (nonatomic, strong) UIButton *logButton;   // 右上角感叹号 → 日志面板
 @end
 
 @implementation QCLANController
@@ -191,45 +189,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     self.scrollView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     [self.view addSubview:self.scrollView];
 
-    [self setupLogButton];
     [self buildUI];
-}
-
-#pragma mark - 右上角感叹号日志按钮
-
-- (void)setupLogButton {
-    self.logButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    UIImage *icon = [UIImage systemImageNamed:@"exclamationmark.circle.fill"];
-    if (icon) {
-        [self.logButton setImage:icon forState:UIControlStateNormal];
-    } else {
-        [self.logButton setTitle:@"!" forState:UIControlStateNormal];
-        self.logButton.titleLabel.font = [UIFont boldSystemFontOfSize:20];
-    }
-    self.logButton.tintColor = [UIColor whiteColor];
-    self.logButton.backgroundColor = [UIColor systemOrangeColor];
-    self.logButton.layer.cornerRadius = 19;
-    self.logButton.layer.masksToBounds = YES;
-    self.logButton.accessibilityLabel = @"查看局域网日志";
-    [self.logButton addTarget:self action:@selector(openLogPanel) forControlEvents:UIControlEventTouchUpInside];
-    self.logButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:self.logButton];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.logButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-14],
-        [self.logButton.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:10],
-        [self.logButton.widthAnchor constraintEqualToConstant:38],
-        [self.logButton.heightAnchor constraintEqualToConstant:38],
-    ]];
-    [self.view bringSubviewToFront:self.logButton];
-}
-
-- (void)openLogPanel {
-    [[QCLANLogger sharedLogger] info:@"UI" fmt:@"用户打开日志面板 (v%@)", QC_VERSION];
-    QCLANLogViewController *logVC = [[QCLANLogViewController alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logVC];
-    nav.modalPresentationStyle = UIModalPresentationPageSheet;
-    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
