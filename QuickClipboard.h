@@ -5,7 +5,7 @@
 #define QC_DB_PATH @"/var/mobile/Library/QuickClipboard/clipboard.db"
 #define QC_SYNC_DIR @"/var/mobile/Library/QuickClipboard/sync"
 #define QC_CLOUD_ENCRYPTION_KEY_PREF @"cloudEncryptionKey"
-#define QC_VERSION @"1.3.16"
+#define QC_VERSION @"1.3.20"
 
 extern NSString * const QCClipDidChangeNotification;
 extern NSString * const QCWebDAVSyncRequestNotification;

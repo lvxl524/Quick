@@ -11,6 +11,7 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
 @property (nonatomic, strong) UISwitch *autoScrollSwitch;
 @property (nonatomic, strong) UISwitch *logSwitch;
 @property (nonatomic, strong) UITextView *textView;
+@property (nonatomic, strong) UIButton *resetButton;
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @property (nonatomic, copy) NSString *deviceIdDisplay;
 @end
@@ -74,6 +75,18 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
     self.metaLabel.text = @"device_id: 加载中...";
     self.metaLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.metaLabel];
+
+    // v1.3.20: 一键初始化按钮 (重置为最初安装默认状态)
+    self.resetButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.resetButton setTitle:@"一键初始化（重置为默认状态）" forState:UIControlStateNormal];
+    [self.resetButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.resetButton.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    self.resetButton.backgroundColor = [UIColor systemRedColor];
+    self.resetButton.layer.cornerRadius = 10;
+    self.resetButton.layer.masksToBounds = YES;
+    [self.resetButton addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.resetButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.resetButton];
 
     // 工具行: 过滤 + 自动滚动 + 日志开关
     UIView *toolbar = [[UIView alloc] init];
@@ -150,7 +163,13 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
         [self.metaLabel.leadingAnchor constraintEqualToAnchor:self.headerLabel.leadingAnchor],
         [self.metaLabel.trailingAnchor constraintEqualToAnchor:self.headerLabel.trailingAnchor],
 
-        [toolbar.topAnchor constraintEqualToAnchor:self.metaLabel.bottomAnchor constant:8],
+        // v1.3.20: 一键初始化按钮置于 metaLabel 之下, 工具行在其下方
+        [self.resetButton.topAnchor constraintEqualToAnchor:self.metaLabel.bottomAnchor constant:8],
+        [self.resetButton.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.resetButton.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [self.resetButton.heightAnchor constraintEqualToConstant:40],
+
+        [toolbar.topAnchor constraintEqualToAnchor:self.resetButton.bottomAnchor constant:8],
         [toolbar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [toolbar.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-16],
 
@@ -238,6 +257,33 @@ static NSString * const kLocalBaseURL = @"http://127.0.0.1:35691";
     [alert addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         [[QCLANLogger sharedLogger] clearLog];
         [self refreshLog];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+// v1.3.20: 一键初始化 —— 确认后调用本地服务重置为最初安装默认状态
+- (void)resetTapped {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"一键初始化"
+                                                                   message:@"将清除所有已配对设备、剪贴板记录与设置，恢复到最初安装状态。确定继续吗？"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"重置" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[kLocalBaseURL stringByAppendingString:@"/control/reset"]]];
+        req.HTTPMethod = @"POST";
+        req.timeoutInterval = 10.0;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[QCLANLogger sharedLogger] info:@"UI" fmt:@"一键初始化请求完成 (err=%@)", err ? err.localizedDescription : @"无"];
+                UIAlertController *done = [UIAlertController alertControllerWithTitle:@"已完成"
+                                                                              message:err ? @"初始化请求失败，请稍后重试" : @"已重置为默认状态，请重新扫描配对。"
+                                                                       preferredStyle:UIAlertControllerStyleAlert];
+                [done addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:^(UIAlertAction *aa) {
+                    [self refreshLog];
+                    [self fetchDeviceInfo];
+                }]];
+                [self presentViewController:done animated:YES completion:nil];
+            });
+        }] resume];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }

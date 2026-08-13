@@ -16,6 +16,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)updateItem:(QCClipItem *)item;
 - (BOOL)markDeleted:(QCClipItem *)item;
 - (BOOL)cleanupDeletedBefore:(NSDate *)date;
+// v1.3.20: 清空全部剪贴板记录 (一键初始化用)
+- (BOOL)clearAll;
 @end
 
 NS_ASSUME_NONNULL_END

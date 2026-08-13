@@ -140,6 +140,30 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
     [defaults synchronize];
 }
 
+// v1.3.20: 一键初始化 —— 重置为最初安装时的默认状态
+// 清空已配对设备 + 剪贴板库 + 全局偏好(deviceId/开关回默认) + 重新生成配对码 + 清空日志
+- (void)performFactoryReset {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    // 1. 清空已配对设备 (内存 + 磁盘 peers.plist)
+    [_peers removeAllObjects];
+    [self savePeers];
+    // 2. 清空剪贴板库
+    [[QCStore sharedStore] clearAll];
+    // 3. 删除同步缓存目录 (遗留, 若存在)
+    [fm removeItemAtPath:QC_SYNC_DIR error:nil];
+    // 4. 清空 deviceId 旧值 + 删除全局偏好 (deviceId/各开关全部回到默认)
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:@"sync_transfer_device_id"];
+    [defaults synchronize];
+    [fm removeItemAtPath:QC_PREFS_PATH error:nil];
+    // 5. 立即重建 deviceId (生成全新 UUID 并写回, 保证设置页与 SpringBoard 跨进程一致)
+    (void)[self deviceId];
+    // 6. 重新生成配对码
+    [self refreshPairCode];
+    // 7. 清空日志
+    [[QCLANLogger sharedLogger] clearLog];
+}
+
 - (BOOL)verifyPairingCode:(NSString *)code {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *expected = [defaults stringForKey:kPairCodeDefaultsKey];
@@ -575,6 +599,12 @@ static NSString * const kPairCodeAttemptsDefaultsKey = @"lanPairingFailedAttempt
         [self refreshPairCode];
         responseData = [self jsonResponse:@{@"code": self.pairCode} statusCode:&statusCode];
         [[QCLANLogger sharedLogger] info:@"UI" fmt:@"本地UI刷新配对码: %@", self.pairCode];
+
+    // POST /control/reset —— 本地 UI 一键初始化 (重置为最初安装默认状态, 仅 loopback)
+    } else if ([path isEqualToString:@"/control/reset"] && [method isEqualToString:@"POST"] && [address isEqualToString:kLoopbackIP]) {
+        [self performFactoryReset];
+        responseData = [self jsonResponse:@{@"ok": @YES, @"message": @"已重置为默认状态"} statusCode:&statusCode];
+        [[QCLANLogger sharedLogger] info:@"SYS" fmt:@"一键初始化完成, 已重置为默认状态"];
 
     // GET /scan —— 本地 UI 触发扫描
     } else if ([path isEqualToString:@"/scan"] && [method isEqualToString:@"GET"] && [address isEqualToString:kLoopbackIP]) {

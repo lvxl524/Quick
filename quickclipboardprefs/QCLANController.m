@@ -147,6 +147,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
 
 @property (nonatomic, copy) NSString *pairingCode;
 @property (nonatomic, copy) NSString *localAddress;
+@property (nonatomic, copy) NSArray<NSString *> *localAddresses;
 
 @property (nonatomic, copy) NSString *peersLoadError;
 @property (nonatomic, assign) BOOL peersLoadedOnce;
@@ -187,6 +188,7 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     }
 
     self.localAddress = [self getLocalIPAddress] ?: @"未连接";
+    self.localAddresses = [self getAllLocalIPAddresses];
 
     [self loadPeersFromServer];
 
@@ -545,7 +547,12 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     [localCard.contentView addSubview:epTitle];
 
     self.endpointLabel = [[UILabel alloc] init];
-    self.endpointLabel.text = [NSString stringWithFormat:@"http://%@:35691", self.localAddress];
+    // v1.3.20: 显示本机全部网络接口 IP (含接口名), 而非只显示第一个
+    if (self.localAddresses.count > 0) {
+        self.endpointLabel.text = [self.localAddresses componentsJoinedByString:@"\n"];
+    } else {
+        self.endpointLabel.text = [NSString stringWithFormat:@"http://%@:35691", self.localAddress];
+    }
     self.endpointLabel.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
     self.endpointLabel.textColor = [UIColor labelColor];
     self.endpointLabel.numberOfLines = 0;
@@ -1208,6 +1215,25 @@ static const void *kDeviceIdKey = &kDeviceIdKey;
     }
     freeifaddrs(ifaddr);
     return ip;
+}
+
+// v1.3.20: 返回本机所有非回环 IPv4 地址 (含接口名), 用于"本机地址"卡片展示全部 IP
+- (NSArray<NSString *> *)getAllLocalIPAddresses {
+    struct ifaddrs *ifaddr = NULL;
+    if (getifaddrs(&ifaddr) != 0) return @[];
+    NSMutableArray<NSString *> *ips = [NSMutableArray array];
+    for (struct ifaddrs *ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        char addrBuf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &((struct sockaddr_in *)ifa->ifa_addr)->sin_addr, addrBuf, sizeof(addrBuf));
+        NSString *ip = [NSString stringWithUTF8String:addrBuf];
+        if (ip.length == 0 || [ip hasPrefix:@"127."]) continue; // 跳过回环
+        const char *name = ifa->ifa_name ?: "";
+        NSString *line = [NSString stringWithFormat:@"http://%@:35691  (%s)", ip, name];
+        [ips addObject:line];
+    }
+    freeifaddrs(ifaddr);
+    return ips;
 }
 
 - (NSInteger)clipCount {

@@ -204,4 +204,20 @@ static NSString * const kDBPath = @"/var/mobile/Library/QuickClipboard/clipboard
     return ok;
 }
 
+// v1.3.20: 清空全部剪贴板记录 (一键初始化)
+- (BOOL)clearAll {
+    __block BOOL ok = NO;
+    dispatch_sync(_queue, ^{
+        const char *sql = "DELETE FROM clips";
+        char *err = NULL;
+        int rc = sqlite3_exec(self->_db, sql, NULL, NULL, &err);
+        if (err) {
+            NSLog(@"[QuickClipboard] clearAll error: %s", err);
+            sqlite3_free(err);
+        }
+        ok = (rc == SQLITE_OK);
+    });
+    return ok;
+}
+
 @end
